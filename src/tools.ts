@@ -45,7 +45,7 @@ export type ToolResult = { output: string; images?: MediaImage[] };
 export function videoImages(name: string, digest: VideoDigest): MediaImage[] {
   const header =
     `【動画】「${name}」長さ${formatSeconds(digest.durationSec)}${digest.hasAudio ? "・音声あり（音は聞こえない）" : "・音声なし"}。` +
-    `ここから${digest.frames.length}枚は、この1本の動画を再生した時のフレーム（静止画の投稿ではない）。` +
+    "以下はこの1本の動画を再生している様子（時刻つき）。静止画の投稿ではない。" +
     "動画として、流れ・動き・雰囲気を話してね。フレームやコマを見たことはわざわざ言わない。\n";
   return digest.frames.map((frame, i) => ({
     url: frame.dataUri,
@@ -273,7 +273,8 @@ const FUNCTION_TOOLS: FunctionTool[] = [
     name: "generate_image",
     description:
       `イラストを生成して返信に添付する。相手が明確に「描いて」「画像作って」と頼んだ時だけ使う。1人1日${IMAGE_GEN_PER_USER_PER_DAY}枚まで。` +
-      "性的・暴力的・実在人物・他者の著作物キャラの生成は断る。prompt は英語で具体的に。",
+      "性的・暴力的・実在人物・他者の著作物キャラの生成は断る。prompt は英語で具体的に。" +
+      "ぴくたーちゃん自身を描く時は外見を必ず含める: cute anime girl, long multicolored hair with orange, blue and green tones, soft bangs, ahoge, vivid blue eyes, soft blush, stylish student uniform with a cute ribbon, cheerful smile。",
     parameters: {
       type: "object",
       properties: {
@@ -483,7 +484,7 @@ async function generateImage(ctx: ToolContext, prompt: string, aspectRatio: stri
   const res = await fetch("https://api.x.ai/v1/images/generations", {
     method: "POST",
     headers: { "Content-Type": "application/json", Authorization: `Bearer ${GROK_API_KEY}` },
-    body: JSON.stringify({ model: IMAGE_MODEL, prompt: truncate(prompt, 1500), aspect_ratio: aspectRatio, image_format: "base64" }),
+    body: JSON.stringify({ model: IMAGE_MODEL, prompt: truncate(prompt, 1500), aspect_ratio: aspectRatio, response_format: "b64_json" }),
     signal: AbortSignal.timeout(120_000),
   });
   if (!res.ok) {
@@ -491,8 +492,16 @@ async function generateImage(ctx: ToolContext, prompt: string, aspectRatio: stri
     return { output: "画像生成に失敗したよ（内容が制限に引っかかったかも）" };
   }
   const json = (await res.json()) as any;
-  const b64 = json?.data?.[0]?.b64_json ?? json?.image;
-  if (!b64) return { output: "画像データが返ってこなかったよ" };
+  let b64: string | undefined = json?.data?.[0]?.b64_json ?? json?.image;
+  const imageUrl: string | undefined = json?.data?.[0]?.url ?? json?.url;
+  if (!b64 && imageUrl) {
+    const img = await fetch(imageUrl, { signal: AbortSignal.timeout(60_000) });
+    if (img.ok) b64 = Buffer.from(await img.arrayBuffer()).toString("base64");
+  }
+  if (!b64) {
+    console.error("[IMAGE GEN] no image in response", JSON.stringify(json).slice(0, 300));
+    return { output: "画像データが返ってこなかったよ" };
+  }
 
   usageCounter.increment(userKey);
   usageCounter.increment("img:total");

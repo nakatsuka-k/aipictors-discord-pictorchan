@@ -77,6 +77,8 @@ export async function createResponse(params: {
   model?: string;
   maxOutputTokens?: number;
   temperature?: number;
+  /** 特定の関数を必ず呼ばせる */
+  forceFunction?: string;
 }): Promise<ResponsesResult | null> {
   try {
     const res = await fetch(RESPONSES_ENDPOINT, {
@@ -87,6 +89,7 @@ export async function createResponse(params: {
         store: false,
         input: params.input,
         tools: params.tools?.length ? params.tools : undefined,
+        tool_choice: params.forceFunction && params.tools?.length ? { type: "function", name: params.forceFunction } : undefined,
         max_output_tokens: params.maxOutputTokens ?? 800,
         temperature: params.temperature,
       }),

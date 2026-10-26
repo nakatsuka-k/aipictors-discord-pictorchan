@@ -21,7 +21,7 @@ async function generateWelcomeImage(userName: string): Promise<AttachmentBuilder
     const res = await fetch("https://api.x.ai/v1/images/generations", {
       method: "POST",
       headers: { "Content-Type": "application/json", Authorization: `Bearer ${GROK_API_KEY}` },
-      body: JSON.stringify({ model: IMAGE_MODEL, prompt, aspect_ratio: ASPECT_RATIO, resolution: RESOLUTION, image_format: "base64" }),
+      body: JSON.stringify({ model: IMAGE_MODEL, prompt, aspect_ratio: ASPECT_RATIO, resolution: RESOLUTION, response_format: "b64_json" }),
       signal: AbortSignal.timeout(120_000),
     });
     if (!res.ok) {

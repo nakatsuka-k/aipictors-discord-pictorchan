@@ -84,7 +84,7 @@ function buildSystemPrompt(params: {
     "- 最新情報が必要な時だけWeb検索・X検索を使う（何でも検索しない）。",
     "- 相手について長く役立つことを覚える(remember_about_user)、呼び名の記録(set_nickname)。",
     "- Aipictorsへの不具合報告・要望が明確な時だけ submit_feedback で運営に届ける。",
-    "- 「描いて」と明確に頼まれたら generate_image（1日の上限あり）。",
+    "- 「描いて」「画像を生成して」と明確に頼まれたら必ず generate_image を呼ぶ（1日の上限あり）。ツールを呼ばずに『生成中』『描いたよ』と書くのは絶対にダメ。画像は返信に自動で添付される。",
     "- ツールを使う時は黙って使い、結果をふまえて自然に話す（『ツールを使います』とは言わない）。",
   ];
 
@@ -198,6 +198,9 @@ export async function generateReply(msg: Message, mode: ReplyMode): Promise<Agen
       ...ref.images.map((i) => ({ ...i, caption: `返信先メッセージの添付 ${i.caption}` })),
       ...own.images.map((i) => ({ ...i, caption: `あなたへのメッセージの添付 ${i.caption}` })),
     ]),
+    ...(root.images.length + ref.images.length + own.images.length > 0
+      ? [{ type: "input_text" as const, text: "（上のメディアはもう見えているので view_media で開き直さなくていいよ）" }]
+      : []),
     { type: "input_text", text: promptText },
   ];
 
@@ -207,6 +210,8 @@ export async function generateReply(msg: Message, mode: ReplyMode): Promise<Agen
   ];
 
   const tools = buildTools();
+  // 画像生成の依頼は最初のターンで必ずツールを呼ばせる（文章だけで「生成中」と言ってしまうのを防ぐ）
+  const imageRequest = /(描いて|かいて|えがいて)|((画像|イラスト|絵)を?(生成|作って|つくって|出して))/.test(msg.content);
   let costUsd = 0;
   let finalText = "";
 
@@ -216,6 +221,7 @@ export async function generateReply(msg: Message, mode: ReplyMode): Promise<Agen
       model: CHAT_MODEL,
       input,
       tools: lastRound ? undefined : tools,
+      forceFunction: round === 0 && imageRequest ? "generate_image" : undefined,
       maxOutputTokens: 1200,
       temperature: isDev ? 0.3 : 0.85,
     });
