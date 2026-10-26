@@ -132,18 +132,14 @@ export async function imageUrlToDataUri(url: string): Promise<string | null> {
 }
 
 export type VideoDigest = {
-  gridDataUri: string;
+  frames: Array<{ time: number; dataUri: string }>;
   durationSec: number;
-  frameTimes: number[];
   hasAudio: boolean;
   width?: number;
   height?: number;
 };
 
-/**
- * 動画URL → 等間隔のフレームを並べた1枚のコンタクトシート。
- * 1枚にまとめることで画像トークンを節約しつつ、動画の流れを把握できる。
- */
+/** 動画URL → 等間隔に切り出した数フレーム（512px幅、時刻つき） */
 export async function digestVideo(url: string, frameCount = 6): Promise<VideoDigest | null> {
   try {
     return await withTempDir(async (dir) => {
@@ -176,25 +172,14 @@ export async function digestVideo(url: string, frameCount = 6): Promise<VideoDig
           runFfmpeg(["-ss", t.toFixed(2), "-i", input, "-frames:v", "1", "-vf", "scale=512:-2", "-q:v", "4", "-y", path.join(dir, `f${i}.jpg`)], 30_000),
         ),
       );
-      const frames = frameTimes.map((_, i) => path.join(dir, `f${i}.jpg`)).filter((f) => fs.existsSync(f));
-      if (frames.length === 0) return null;
-
-      const cols = frames.length >= 6 ? 3 : frames.length;
-      const grid = path.join(dir, "grid.jpg");
-      const inputs = frames.flatMap((f) => ["-i", f]);
-      const padded = frames.map((_, i) => `[${i}:v]scale=512:288:force_original_aspect_ratio=decrease,pad=512:288:(ow-iw)/2:(oh-ih)/2:color=black[v${i}]`);
-      const layout = frames.map((_, i) => `${(i % cols) * 512}_${Math.floor(i / cols) * 288}`).join("|");
-      const filter = `${padded.join(";")};${frames.map((_, i) => `[v${i}]`).join("")}xstack=inputs=${frames.length}:layout=${layout}:fill=black[out]`;
-      if (frames.length === 1) {
-        fs.copyFileSync(frames[0], grid);
-      } else {
-        await runFfmpeg([...inputs, "-filter_complex", filter, "-map", "[out]", "-frames:v", "1", "-q:v", "3", "-y", grid], 30_000);
-      }
+      const extracted = frameTimes
+        .map((time, i) => ({ time, file: path.join(dir, `f${i}.jpg`) }))
+        .filter((f) => fs.existsSync(f.file));
+      if (extracted.length === 0) return null;
 
       return {
-        gridDataUri: `data:image/jpeg;base64,${fs.readFileSync(grid).toString("base64")}`,
+        frames: extracted.map((f) => ({ time: f.time, dataUri: `data:image/jpeg;base64,${fs.readFileSync(f.file).toString("base64")}` })),
         durationSec,
-        frameTimes: frameTimes.slice(0, frames.length),
         hasAudio,
         width: size ? Number(size[1]) : undefined,
         height: size ? Number(size[2]) : undefined,

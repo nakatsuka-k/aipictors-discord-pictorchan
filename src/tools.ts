@@ -15,7 +15,7 @@ import {
   IMAGE_MODEL,
 } from "./config";
 import { postFeedback } from "./feedback";
-import { digestVideo, formatSeconds, imageUrlToDataUri, isImageAttachment, isVideoAttachment } from "./media";
+import { digestVideo, formatSeconds, imageUrlToDataUri, isImageAttachment, isVideoAttachment, type VideoDigest } from "./media";
 import { nameMemory, notesMemory, serverMessageLog, usageCounter } from "./store";
 import { sampleEvenly, shortJapanTime, truncate } from "./util";
 import { readUrl } from "./web";
@@ -31,9 +31,50 @@ export type ToolContext = {
   files: AttachmentBuilder[];
   /** 実行したツールの記録（ログ用） */
   trace: string[];
+  /** 同じ返信内で同じツール呼び出しを繰り返さないため */
+  seenCalls?: Set<string>;
 };
 
-export type ToolResult = { output: string; images?: string[] };
+export type MediaImage = { url: string; caption: string };
+export type ToolResult = { output: string; images?: MediaImage[] };
+
+/**
+ * 動画をモデルに見せる形にする。1フレームずつ「動画の◯秒時点」と明示して渡す
+ * （1枚にまとめると「画像を何枚も貼った」と誤解されるため）。
+ */
+export function videoImages(name: string, digest: VideoDigest): MediaImage[] {
+  const header =
+    `【動画】「${name}」長さ${formatSeconds(digest.durationSec)}${digest.hasAudio ? "・音声あり（音は聞こえない）" : "・音声なし"}。` +
+    `ここから${digest.frames.length}枚は、この1本の動画を再生した時のフレーム（静止画の投稿ではない）。` +
+    "動画として、流れ・動き・雰囲気を話してね。フレームやコマを見たことはわざわざ言わない。\n";
+  return digest.frames.map((frame, i) => ({
+    url: frame.dataUri,
+    caption: `${i === 0 ? header : ""}動画「${name}」の ${formatSeconds(frame.time)} 時点`,
+  }));
+}
+
+export function videoSummary(name: string, digest: VideoDigest): string {
+  return `動画「${name}」長さ${formatSeconds(digest.durationSec)}（再生中のフレームを${digest.frames.length}枚見せるよ）`;
+}
+
+/** メッセージの添付（画像・動画）をモデルに見せられる形にする */
+export async function loadMessageMedia(m: Message, limit: number): Promise<{ images: MediaImage[]; notes: string[] }> {
+  const images: MediaImage[] = [];
+  const notes: string[] = [];
+  for (const att of Array.from(m.attachments.values()).slice(0, limit)) {
+    const name = att.name ?? "file";
+    if (isImageAttachment(att)) {
+      const data = await imageUrlToDataUri(att.url);
+      if (data) images.push({ url: data, caption: `【画像】「${name}」` });
+      else notes.push(`画像「${name}」は読み込めなかった`);
+    } else if (isVideoAttachment(att)) {
+      const digest = await digestVideo(att.url);
+      if (digest) images.push(...videoImages(name, digest));
+      else notes.push(`動画「${name}」は解析できなかった`);
+    }
+  }
+  return { images, notes };
+}
 
 // ──────────────────────────────────────────────────────────
 // メッセージ整形（メディアは短い参照IDにして渡す）
@@ -260,6 +301,12 @@ export async function runTool(ctx: ToolContext, name: string, rawArgs: string): 
   } catch {
     return { output: "引数がJSONとして読めなかったよ" };
   }
+  const callKey = `${name}:${JSON.stringify(args)}`;
+  ctx.seenCalls ??= new Set();
+  if (ctx.seenCalls.has(callKey) && name !== "generate_image") {
+    return { output: "それはこの返信の中ですでに取得済みだよ。上の結果を使ってね" };
+  }
+  ctx.seenCalls.add(callKey);
   ctx.trace.push(`${name}(${truncate(rawArgs ?? "", 80)})`);
 
   try {
@@ -372,22 +419,14 @@ async function readDiscordMessageLink(ctx: ToolContext, url: string): Promise<To
   const around: Message[] = Array.from((await channel.messages.fetch({ limit: 6, before: messageId })).values() as Iterable<Message>)
     .sort((a, b) => a.createdTimestamp - b.createdTimestamp);
   const botId = ctx.msg.client.user!.id;
-  const images: string[] = [];
-  for (const att of Array.from(target.attachments.values()).slice(0, 3)) {
-    if (isImageAttachment(att)) {
-      const data = await imageUrlToDataUri(att.url);
-      if (data) images.push(data);
-    } else if (isVideoAttachment(att)) {
-      const digest = await digestVideo(att.url);
-      if (digest) images.push(digest.gridDataUri);
-    }
-  }
+  const { images, notes } = await loadMessageMedia(target, 3);
   return {
     output: [
       `#${channel.name} のメッセージ:`,
       formatMessage(ctx, target, botId),
       around.length ? `\n（直前の流れ）\n${around.map((m) => formatMessage(ctx, m, botId)).join("\n")}` : "",
-      images.length ? "\n（このメッセージの画像/動画コマを添付したよ）" : "",
+      images.length ? `\n（このメッセージの添付: ${images.map((i) => i.caption.split(/[。\n]/)[0]).filter((c) => !/時点$/.test(c)).join(" / ")}。中身は次のメッセージで見せるよ）` : "",
+      notes.length ? `（${notes.join(" / ")}）` : "",
     ].join("\n"),
     images,
   };
@@ -400,7 +439,7 @@ async function readAnyUrl(ctx: ToolContext, url: string, withImages: boolean): P
   const result = await readUrl(url, { withMedia: withImages || undefined });
   const refs = result.mediaUrls.map((u) => registerMedia(ctx, u, /\.(mp4|mov|webm)/i.test(u) ? "video" : "image", "linked"));
   return {
-    output: result.text + (refs.length ? `\n（未表示のメディア: ${refs.join(", ")}）` : "") + (result.images.length ? "\n（画像を添付したよ）" : ""),
+    output: result.text + (refs.length ? `\n（未表示のメディア: ${refs.join(", ")}）` : "") + (result.images.length ? "\n（メディアは次のメッセージで見せるよ）" : ""),
     images: result.images,
   };
 }
@@ -408,25 +447,29 @@ async function readAnyUrl(ctx: ToolContext, url: string, withImages: boolean): P
 async function viewMedia(ctx: ToolContext, ref: string): Promise<ToolResult> {
   const entry = ctx.media.get(ref.trim());
   const url = entry?.url ?? (/^https?:\/\//.test(ref) ? ref : null);
-  if (!url) return { output: `${ref} が見つからないよ` };
+  if (!url) {
+    const known = Array.from(ctx.media.keys());
+    return { output: `${ref} は存在しないよ。参照IDを作らないでね。${known.length ? `使えるのは ${known.join(", ")} だけ` : "見られるメディアはないよ"}` };
+  }
 
   const kind = entry?.kind ?? (/\.(mp4|mov|webm|m4v)(\?|$)/i.test(url) ? "video" : "image");
   if (kind === "video") {
     const digest = await digestVideo(url);
     if (!digest) return { output: "動画を解析できなかったよ" };
-    return {
-      output: `動画 長さ${formatSeconds(digest.durationSec)}${digest.hasAudio ? "（音声あり・音は聞こえない）" : ""}。添付は ${digest.frameTimes.map(formatSeconds).join(", ")} 時点のコマを左上→右下に並べたもの`,
-      images: [digest.gridDataUri],
-    };
+    const name = entry?.label ?? "動画";
+    return { output: videoSummary(name, digest), images: videoImages(name, digest) };
   }
   const data = await imageUrlToDataUri(url);
   if (!data) {
     // 画像でなければ動画として再挑戦
     const digest = await digestVideo(url);
-    if (digest) return { output: `動画 長さ${formatSeconds(digest.durationSec)}。添付はコマを時間順に並べたもの`, images: [digest.gridDataUri] };
+    if (digest) {
+      const name = entry?.label ?? "動画";
+      return { output: videoSummary(name, digest), images: videoImages(name, digest) };
+    }
     return { output: "画像を取得できなかったよ" };
   }
-  return { output: "画像を添付したよ", images: [data] };
+  return { output: "画像は次のメッセージで見せるよ", images: [{ url: data, caption: `【画像】「${entry?.label ?? "画像"}」` }] };
 }
 
 async function generateImage(ctx: ToolContext, prompt: string, aspectRatio: string): Promise<ToolResult> {
@@ -457,6 +500,6 @@ async function generateImage(ctx: ToolContext, prompt: string, aspectRatio: stri
   const remaining = IMAGE_GEN_PER_USER_PER_DAY - usageCounter.get(userKey);
   return {
     output: `生成できたよ。返信に自動で添付される（今日あと${remaining}枚）。描いた内容をひとこと添えて`,
-    images: [`data:image/jpeg;base64,${b64}`],
+    images: [{ url: `data:image/jpeg;base64,${b64}`, caption: "【あなたが今生成した画像】" }],
   };
 }

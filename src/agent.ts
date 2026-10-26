@@ -1,8 +1,7 @@
 import type { Guild, Message } from "discord.js";
 import { CHAT_MODEL, MAX_AGENT_ROUNDS } from "./config";
-import { digestVideo, formatSeconds, imageUrlToDataUri, isImageAttachment, isVideoAttachment } from "./media";
 import { conversationMemory, nameMemory, notesMemory } from "./store";
-import { buildTools, formatMessage, runTool, type ToolContext } from "./tools";
+import { buildTools, formatMessage, loadMessageMedia, runTool, type MediaImage, type ToolContext } from "./tools";
 import { chooseRandom, getJapanTime, truncate } from "./util";
 import { createResponse, type InputContent, type InputItem } from "./xai";
 
@@ -79,7 +78,8 @@ function buildSystemPrompt(params: {
     "# できること（ツール）",
     "- 他のチャンネルやスレッドを読む(read_channel / list_channels)、過去ログ検索(search_messages)。『〇〇チャンネルで何話してた？』『最近の流れまとめて』などに使う。",
     "- URLの中身を読む(read_url)。Webページ、Xのポスト、YouTube（概要欄と動画全体のコマ）、Discordのメッセージリンク、画像・動画の直リンク。会話にURLがあって中身に触れるなら推測せず必ず読む。",
-    "- 画像や動画を見る(view_media)。動画はコマ割り画像として見える（音は聞こえない）。ログ中の media#番号 を指定。",
+    "- 画像や動画を見る(view_media)。ログ中の media#番号 を指定。",
+    "- 動画は『◯秒時点』と書かれた数枚のフレームとして見える。それは1本の動画なので、『画像が何枚』『コマ』『フレーム』とは言わず、普通に動画を見た人として流れや動きを話す。音は聞こえない。過去ログで動画を画像と勘違いした発言があっても引きずらない。",
     "- search_messages は『前に誰かが話してた』などサーバーの過去の会話を聞かれた時だけ使う。一般的な知識で答えられる質問には使わない。キーワードは1〜2語（ORは使えない）。",
     "- 最新情報が必要な時だけWeb検索・X検索を使う（何でも検索しない）。",
     "- 相手について長く役立つことを覚える(remember_about_user)、呼び名の記録(set_nickname)。",
@@ -114,30 +114,12 @@ function buildSystemPrompt(params: {
   return [...persona, ...toolGuide, ...modeGuide, ...context].filter((line) => line !== "").join("\n");
 }
 
-async function mediaFromMessage(ctx: ToolContext, m: Message, limit: number): Promise<{ notes: string[]; images: string[] }> {
-  const notes: string[] = [];
-  const images: string[] = [];
-  for (const att of Array.from(m.attachments.values()).slice(0, limit)) {
-    if (isImageAttachment(att)) {
-      const data = await imageUrlToDataUri(att.url);
-      if (data) {
-        images.push(data);
-        notes.push(`画像「${att.name}」を添付`);
-      }
-    } else if (isVideoAttachment(att)) {
-      const digest = await digestVideo(att.url);
-      if (digest) {
-        images.push(digest.gridDataUri);
-        notes.push(
-          `動画「${att.name}」長さ${formatSeconds(digest.durationSec)}${digest.hasAudio ? "・音声あり（音は聞こえない）" : ""}。` +
-            `${digest.frameTimes.map(formatSeconds).join(", ")} 時点のコマを左上→右下に並べた画像を添付`,
-        );
-      } else {
-        notes.push(`動画「${att.name}」は解析できなかった`);
-      }
-    }
-  }
-  return { notes, images };
+/** 画像ごとに直前へ説明文を置く（動画のコマ一覧を「複数の画像」と誤解させないため） */
+function withCaptions(images: MediaImage[]): InputContent[] {
+  return images.flatMap((image) => [
+    { type: "input_text" as const, text: image.caption },
+    { type: "input_image" as const, image_url: image.url, detail: "high" as const },
+  ]);
 }
 
 // ──────────────────────────────────────────────────────────
@@ -178,6 +160,11 @@ export async function generateReply(msg: Message, mode: ReplyMode): Promise<Agen
   // 返信先メッセージ
   let referenced: Message | null = null;
   if (msg.reference?.messageId) referenced = await msg.fetchReference().catch(() => null);
+  // 返信先がさらに返信なら、その元（例: 動画の投稿 → Botの返事 → 「再度確認して」）も見る
+  let rootReferenced: Message | null = null;
+  if (referenced?.reference?.messageId && referenced.attachments.size === 0) {
+    rootReferenced = await referenced.fetchReference().catch(() => null);
+  }
 
   const isDev = /\/dev\b/i.test(msg.content) || /\/dev\b/i.test(referenced?.content ?? "");
   const emojis = availableServerEmojis(guild);
@@ -189,11 +176,14 @@ export async function generateReply(msg: Message, mode: ReplyMode): Promise<Agen
 
   const current = formatMessage(ctx, msg, botId);
 
-  const own = await mediaFromMessage(ctx, msg, 4);
-  const ref = referenced ? await mediaFromMessage(ctx, referenced, 2) : { notes: [], images: [] };
+  const empty = { images: [] as MediaImage[], notes: [] as string[] };
+  const own = await loadMessageMedia(msg, 4);
+  const ref = referenced ? await loadMessageMedia(referenced, 2) : empty;
+  const root = rootReferenced ? await loadMessageMedia(rootReferenced, 2) : empty;
 
   const promptText = [
     recent.length ? `## 最近のチャンネルの流れ（古い順）\n${recent.map((m) => formatMessage(ctx, m, botId)).join("\n")}` : "",
+    rootReferenced ? `## 返信先のさらに元のメッセージ\n${formatMessage(ctx, rootReferenced, botId)}${root.notes.length ? `\n（${root.notes.join(" / ")}）` : ""}` : "",
     referenced ? `## 返信先のメッセージ\n${formatMessage(ctx, referenced, botId)}${ref.notes.length ? `\n（${ref.notes.join(" / ")}）` : ""}` : "",
     `## あなたへのメッセージ${mode === "auto" ? "（このチャンネルの最新発言）" : ""}\n${current}${own.notes.length ? `\n（${own.notes.join(" / ")}）` : ""}`,
     "",
@@ -203,7 +193,11 @@ export async function generateReply(msg: Message, mode: ReplyMode): Promise<Agen
   ].filter(Boolean).join("\n\n");
 
   const userContent: InputContent[] = [
-    ...[...ref.images, ...own.images].map((url) => ({ type: "input_image" as const, image_url: url, detail: "high" as const })),
+    ...withCaptions([
+      ...root.images.map((i) => ({ ...i, caption: `返信先のさらに元のメッセージの添付 ${i.caption}` })),
+      ...ref.images.map((i) => ({ ...i, caption: `返信先メッセージの添付 ${i.caption}` })),
+      ...own.images.map((i) => ({ ...i, caption: `あなたへのメッセージの添付 ${i.caption}` })),
+    ]),
     { type: "input_text", text: promptText },
   ];
 
@@ -235,7 +229,7 @@ export async function generateReply(msg: Message, mode: ReplyMode): Promise<Agen
     }
 
     input.push(...result.output);
-    const toolImages: string[] = [];
+    const toolImages: MediaImage[] = [];
     for (const call of calls.slice(0, 4)) {
       const toolResult = await runTool(ctx, call.name ?? "", call.arguments ?? "{}");
       input.push({ type: "function_call_output", call_id: call.call_id!, output: truncate(toolResult.output, 24_000) });
@@ -246,8 +240,8 @@ export async function generateReply(msg: Message, mode: ReplyMode): Promise<Agen
       input.push({
         role: "user",
         content: [
-          { type: "input_text", text: "（ツールで取得した画像/動画コマ）" },
-          ...toolImages.slice(0, 6).map((url) => ({ type: "input_image" as const, image_url: url, detail: "high" as const })),
+          { type: "input_text", text: "（ツールで取得したメディア。それぞれの説明に従って解釈してね）" },
+          ...withCaptions(toolImages.slice(0, 12)),
         ],
       });
     }

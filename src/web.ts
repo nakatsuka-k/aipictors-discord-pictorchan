@@ -1,11 +1,12 @@
 import * as cheerio from "cheerio";
 import { digestVideo, formatSeconds, imageUrlToDataUri, readLimited, safeFetch } from "./media";
+import { videoImages, type MediaImage } from "./tools";
 import { truncate } from "./util";
 
 export type UrlReadResult = {
   text: string;
-  /** モデルに直接見せる画像（data URI または公開URL） */
-  images: string[];
+  /** モデルに直接見せる画像（説明つき） */
+  images: MediaImage[];
   /** 本文中で見つかったが未取得のメディアURL（必要ならview_mediaで見る） */
   mediaUrls: string[];
 };
@@ -63,7 +64,7 @@ async function readYouTube(url: string, options: { withMedia?: boolean }): Promi
   if (!id) return null;
 
   const lines: string[] = [`[YouTube動画] https://www.youtube.com/watch?v=${id}`];
-  const images: string[] = [];
+  const images: MediaImage[] = [];
 
   try {
     const res = await safeFetch(`https://www.youtube.com/oembed?format=json&url=${encodeURIComponent(`https://www.youtube.com/watch?v=${id}`)}`);
@@ -95,9 +96,14 @@ async function readYouTube(url: string, options: { withMedia?: boolean }): Promi
 
   if (options.withMedia !== false) {
     if (storyboardUrls.length > 0) {
-      for (const sheet of storyboardUrls) {
+      for (const [i, sheet] of storyboardUrls.entries()) {
         const data = await imageUrlToDataUri(sheet);
-        if (data) images.push(data);
+        if (data) {
+          images.push({
+            url: data,
+            caption: `【YouTube動画のコマ一覧 ${i + 1}/${storyboardUrls.length}】1本の動画から等間隔に切り出したコマを左上→右下の時間順に並べたもの。別々の画像ではなく動画の流れとして扱う`,
+          });
+        }
       }
       if (images.length > 0) {
         lines.push(`（添付画像は動画全体から等間隔に切り出したコマのタイル${images.length}枚。左上→右下が時間順）`);
@@ -106,7 +112,7 @@ async function readYouTube(url: string, options: { withMedia?: boolean }): Promi
     if (images.length === 0) {
       const thumb = await imageUrlToDataUri(`https://i.ytimg.com/vi/${id}/hqdefault.jpg`);
       if (thumb) {
-        images.push(thumb);
+        images.push({ url: thumb, caption: "【YouTubeのサムネイル】" });
         lines.push("（添付画像はサムネイル）");
       }
     }
@@ -135,21 +141,21 @@ async function readTweet(url: string, options: { withMedia?: boolean }): Promise
   ];
   if (tweet.quote) lines.push(`引用元: @${tweet.quote.author?.screen_name}: ${truncate(tweet.quote.text ?? "", 400)}`);
 
-  const images: string[] = [];
+  const images: MediaImage[] = [];
   const mediaUrls: string[] = [];
   const photos: string[] = (tweet.media?.photos ?? []).map((p: any) => p.url).filter(Boolean);
   const videos: string[] = (tweet.media?.videos ?? []).map((v: any) => v.url).filter(Boolean);
 
   if (options.withMedia !== false) {
-    for (const photo of photos.slice(0, 3)) {
+    for (const [i, photo] of photos.slice(0, 3).entries()) {
       const data = await imageUrlToDataUri(photo);
-      if (data) images.push(data);
+      if (data) images.push({ url: data, caption: `【ポストの画像 ${i + 1}枚目】` });
     }
     if (videos[0]) {
       const digest = await digestVideo(videos[0]);
       if (digest) {
-        images.push(digest.gridDataUri);
-        lines.push(`動画: 長さ${formatSeconds(digest.durationSec)}（添付は等間隔に切り出したコマのタイル、左上→右下が時間順）`);
+        images.push(...videoImages("ポストの動画", digest));
+        lines.push(`動画: 長さ${formatSeconds(digest.durationSec)}`);
       }
     }
   } else {
@@ -170,13 +176,13 @@ async function readGeneric(url: string, options: { withMedia?: boolean }): Promi
   if (/^image\//.test(contentType)) {
     res.body?.cancel().catch(() => {});
     const data = await imageUrlToDataUri(url);
-    return { text: `[画像] ${url}`, images: data ? [data] : [], mediaUrls: [] };
+    return { text: `[画像] ${url}`, images: data ? [{ url: data, caption: "【リンク先の画像】" }] : [], mediaUrls: [] };
   }
   if (/^video\//.test(contentType)) {
     res.body?.cancel().catch(() => {});
     const digest = await digestVideo(url);
     return digest
-      ? { text: `[動画] 長さ${formatSeconds(digest.durationSec)}${digest.hasAudio ? " / 音声あり（音は聞こえない）" : ""}（添付は等間隔のコマのタイル、左上→右下が時間順）`, images: [digest.gridDataUri], mediaUrls: [] }
+      ? { text: `[動画] 長さ${formatSeconds(digest.durationSec)}`, images: videoImages("リンク先の動画", digest), mediaUrls: [] }
       : { text: "[動画] 解析できなかったよ", images: [], mediaUrls: [] };
   }
   if (!res.ok) return { text: `HTTP ${res.status} で読み込めなかったよ`, images: [], mediaUrls: [] };
@@ -213,13 +219,13 @@ async function readGeneric(url: string, options: { withMedia?: boolean }): Promi
     body ? `本文（抜粋）:\n${truncate(body, 3500)}` : "",
   ].filter(Boolean);
 
-  const images: string[] = [];
+  const images: MediaImage[] = [];
   const mediaUrls: string[] = [];
   if (ogImage) {
     const abs = new URL(ogImage, url).toString();
     if (options.withMedia) {
       const data = await imageUrlToDataUri(abs);
-      if (data) images.push(data);
+      if (data) images.push({ url: data, caption: "【ページのメイン画像】" });
     } else {
       mediaUrls.push(abs);
     }
