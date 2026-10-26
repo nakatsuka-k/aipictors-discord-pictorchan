@@ -1,0 +1,36 @@
+# fly.toml app configuration file generated for pictorchan-bot on 2025-05-20T22:12:22+09:00
+#
+# See https://fly.io/docs/reference/configuration/ for information about how to use this file.
+#
+
+app = 'pictorchan-bot'
+primary_region = "nrt"
+
+[build]
+
+# Discord bot does not need HTTP service - remove this section
+# Keep the bot running continuously
+[processes]
+  app = "node dist/index.js"
+
+[[vm]]
+  memory = '1gb'
+  cpu_kind = 'shared'
+  cpus = 1
+
+# Keep at least 1 machine running at all times
+[machine]
+  min_machines_running = 1
+  auto_stop_machines = false
+  auto_start_machines = true
+
+# NOTE: Fly's actual machine count is controlled via `flyctl scale count`.
+# Keep it at 1 to avoid duplicate bot messages.
+
+# Persistent storage for conversation memory
+[mounts]
+  source = "pictorchan_data"
+  destination = "/data"
+
+[defaults]
+  region = "nrt"

@@ -1,34 +1,25 @@
 {
   "name": "discord-pictorchan",
-  "version": "1.0.0",
-  "description": "pictorchan",
-  "main": "index.js",
+  "version": "2.0.0",
+  "private": true,
+  "main": "dist/index.js",
+  "license": "MIT",
+  "engines": {
+    "node": ">=22"
+  },
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
-  },
-  "repository": {
-    "type": "git",
-    "url": "git+https://github.com/nakatsuka-k/discord-pictorchan.git"
-  },
-  "keywords": [],
-  "author": "",
-  "license": "ISC",
-  "bugs": {
-    "url": "https://github.com/nakatsuka-k/discord-pictorchan/issues"
-  },
-  "homepage": "https://github.com/nakatsuka-k/discord-pictorchan#readme",
-  "devDependencies": {
-    "@types/axios": "^0.9.36",
-    "node-fetch": "^3.3.2",
-    "typescript": "^5.8.3"
+    "start": "node dist/index.js",
+    "build": "tsc",
+    "typecheck": "tsc --noEmit"
   },
   "dependencies": {
-    "axios": "^1.10.0",
-    "cheerio": "^1.1.0",
-    "discord.js": "^14.21.0",
-    "dotenv": "^17.2.0",
-    "newsapi": "^2.4.1",
-    "node-cron": "^4.2.1",
-    "openai": "^5.9.0"
+    "cheerio": "^1.0.0",
+    "discord.js": "^14.22.1",
+    "dotenv": "^16.5.0",
+    "node-cron": "^4.2.1"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.13",
+    "typescript": "^5.8.3"
   }
 }

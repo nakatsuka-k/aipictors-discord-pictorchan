@@ -1,0 +1,11 @@
+node_modules
+.git
+.env
+.env.*
+src/.local.env
+dist
+image-generation-worker
+queue-status-cron
+test-welcome.js
+.DS_Store
+**/.DS_Store
