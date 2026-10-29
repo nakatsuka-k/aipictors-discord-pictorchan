@@ -64,5 +64,5 @@ export const MAX_IMAGE_BYTES = 10 * 1024 * 1024;
 export const MAX_VIDEO_BYTES = 200 * 1024 * 1024;
 export const MAX_AGENT_ROUNDS = 5;
 export const USER_REQUESTS_PER_MINUTE = 6;
-export const IMAGE_GEN_PER_USER_PER_DAY = 3;
+export const IMAGE_GEN_PER_USER_PER_DAY = 5;
 export const IMAGE_GEN_PER_DAY = 30;

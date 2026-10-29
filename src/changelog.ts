@@ -12,6 +12,17 @@ export type ChangelogEntry = {
 
 export const CHANGELOG: ChangelogEntry[] = [
   {
+    version: "2.0.2",
+    date: "2026-10-30",
+    title: "お絵かきの回数をふやしたよ🎨🥔",
+    items: [
+      "🎨 **1人1日5枚まで描けるようになったよ！**（いままでは3枚）思ってたよりたくさん頼んでもらえてうれしかったから、ふやしたの😆",
+      "🙏 きのう上限で描けなかった人、ごめんね！今日はいっぱい描くからまた頼んでね",
+    ],
+    footer: "「〇〇描いて」って話しかけてね🫶",
+    pictorchanOnly: true,
+  },
+  {
     version: "2.0.1",
     date: "2026-10-29",
     title: "ぴくたーちゃん、ちょっと直ったよ🔧🥔",
