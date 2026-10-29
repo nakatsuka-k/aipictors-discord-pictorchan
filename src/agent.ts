@@ -95,6 +95,7 @@ function buildSystemPrompt(params: {
         "ここはぴくたーちゃん専用のおしゃべりチャンネル。メンションされていないけど、会話に混ざれる。",
         "みんなに向けた発言や自分に話しかけている発言なら自然に返す（短めに）。",
         "他の人の名前を呼んで話しかけている発言、他の人同士の会話の続き、反応しなくていい独り言には割り込まず、本文を [SKIP] だけにして黙る。",
+        "ただし、ぴくたーちゃんへの質問・お願い・感想を求める発言（「〜教えて」「これどう？」「見て」、画像や動画の投稿など）や、返事がなくて聞き直している発言には必ず返す。迷ったら返す。",
       ]
     : [];
 
@@ -214,18 +215,24 @@ export async function generateReply(msg: Message, mode: ReplyMode): Promise<Agen
   const imageRequest = /(描いて|かいて|えがいて)|((画像|イラスト|絵)を?(生成|作って|つくって|出して))/.test(msg.content);
   let costUsd = 0;
   let finalText = "";
+  let apiFailed = false;
 
   for (let round = 0; round < MAX_AGENT_ROUNDS; round++) {
     const lastRound = round === MAX_AGENT_ROUNDS - 1;
-    const result = await createResponse({
+    const request = {
       model: CHAT_MODEL,
       input,
       tools: lastRound ? undefined : tools,
       forceFunction: round === 0 && imageRequest ? "generate_image" : undefined,
       maxOutputTokens: 1200,
       temperature: isDev ? 0.3 : 0.85,
-    });
-    if (!result) break;
+    };
+    // 一時的な失敗もあるので 1 回だけやり直す
+    const result = (await createResponse(request)) ?? (await createResponse(request));
+    if (!result) {
+      apiFailed = true;
+      break;
+    }
     costUsd += result.costUsd;
 
     const calls = result.output.filter((o) => o.type === "function_call");
@@ -258,6 +265,15 @@ export async function generateReply(msg: Message, mode: ReplyMode): Promise<Agen
     return { text: null, files: ctx.files, trace: ctx.trace, costUsd };
   }
   const text = postprocess(finalText.replace(/\[SKIP\]/gi, ""), emojis, isDev);
+  // 失敗したときは黙らない（メンションなしの発言でも、返事が来ないと無視されたように見える）
+  if (!text && apiFailed) {
+    return {
+      text: "ごめんね、ちょっと調子が悪いみたい🥺 少ししてからもう一回話しかけてね",
+      files: ctx.files,
+      trace: [...ctx.trace, "api-failed"],
+      costUsd,
+    };
+  }
   if (!text && mode === "auto") return { text: null, files: ctx.files, trace: ctx.trace, costUsd };
 
   return {

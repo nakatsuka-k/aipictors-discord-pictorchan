@@ -6,9 +6,22 @@ export type ChangelogEntry = {
   title: string;
   items: string[];
   footer?: string;
+  /** 小さな修正は #🌈ぴくたーちゃん だけに投稿する */
+  pictorchanOnly?: boolean;
 };
 
 export const CHANGELOG: ChangelogEntry[] = [
+  {
+    version: "2.0.1",
+    date: "2026-10-29",
+    title: "ぴくたーちゃん、ちょっと直ったよ🔧🥔",
+    items: [
+      "💬 **メンションしなくてもちゃんとお返事するようになったよ！** このチャンネルで「〜教えて」「この動画どう？」って話しかけてくれたのに、黙っちゃうことがあったの。ごめんね🙏 絵文字のあつかいで失敗してたのを直したよ",
+      "🔁 うまく考えられなかったときも、もう一回がんばって、それでもダメなら「調子が悪い」ってちゃんと伝えるようにしたよ",
+    ],
+    footer: "@ぴくたーちゃん しなくても、ここで話しかけてくれたらお返事するね🫶",
+    pictorchanOnly: true,
+  },
   {
     version: "2.0.0",
     date: "2026-10-27",

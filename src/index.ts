@@ -375,7 +375,10 @@ async function announceUpdateIfNeeded() {
 
   const content = formatAnnouncement(CHANGELOG[0]);
   const posted: Record<string, string> = {};
-  for (const channelId of [PICTORCHAN_CHANNEL_ID, ANNOUNCE_CHANNEL_ID]) {
+  const targetChannelIds = CHANGELOG[0].pictorchanOnly
+    ? [PICTORCHAN_CHANNEL_ID]
+    : [PICTORCHAN_CHANNEL_ID, ANNOUNCE_CHANNEL_ID];
+  for (const channelId of targetChannelIds) {
     // 再起動時に片方だけ投稿済みなら二重投稿しない
     if (state.channels?.[channelId] === CURRENT_VERSION) {
       posted[channelId] = CURRENT_VERSION;
@@ -390,7 +393,7 @@ async function announceUpdateIfNeeded() {
       console.error(`[ANNOUNCE] failed to post to ${channelId}`, error);
     }
   }
-  const allPosted = Object.keys(posted).length === 2;
+  const allPosted = targetChannelIds.every((channelId) => posted[channelId] === CURRENT_VERSION);
   writeJsonAtomic(ANNOUNCE_STATE_PATH, {
     lastAnnouncedVersion: allPosted ? CURRENT_VERSION : state.lastAnnouncedVersion,
     channels: { ...(state.channels ?? {}), ...posted },

@@ -1,4 +1,5 @@
 import { CHAT_MODEL, GROK_API_KEY, TEXT_MODEL, VISION_MODEL } from "./config";
+import { toRequestJson } from "./util";
 
 const CHAT_ENDPOINT = "https://api.x.ai/v1/chat/completions";
 const RESPONSES_ENDPOINT = "https://api.x.ai/v1/responses";
@@ -14,7 +15,7 @@ export async function chatText(
     const res = await fetch(CHAT_ENDPOINT, {
       method: "POST",
       headers: { "Content-Type": "application/json", Authorization: `Bearer ${GROK_API_KEY}` },
-      body: JSON.stringify({
+      body: toRequestJson({
         model: options.model ?? TEXT_MODEL,
         messages,
         max_tokens: options.maxTokens ?? 500,
@@ -84,7 +85,7 @@ export async function createResponse(params: {
     const res = await fetch(RESPONSES_ENDPOINT, {
       method: "POST",
       headers: { "Content-Type": "application/json", Authorization: `Bearer ${GROK_API_KEY}` },
-      body: JSON.stringify({
+      body: toRequestJson({
         model: params.model ?? CHAT_MODEL,
         store: false,
         input: params.input,

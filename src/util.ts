@@ -78,7 +78,22 @@ export function splitForDiscord(content: string, maxLength = 1900): string[] {
 
 export function truncate(text: string, max: number): string {
   const value = text ?? "";
-  return value.length <= max ? value : `${value.slice(0, max - 1)}…`;
+  if (value.length <= max) return value;
+  let end = max - 1;
+  // 絵文字など（サロゲートペア）を半分で切らない。半分だけ残ると xAI が JSON を読めず 400 になる
+  const code = value.charCodeAt(end - 1);
+  if (code >= 0xd800 && code <= 0xdbff) end -= 1;
+  return `${value.slice(0, end)}…`;
+}
+
+/** 対になっていないサロゲート（壊れた絵文字の片割れ）を取り除く */
+export function toWellFormed(text: string): string {
+  return text.replace(/[\ud800-\udbff](?![\udc00-\udfff])|(?<![\ud800-\udbff])[\udc00-\udfff]/g, "");
+}
+
+/** API に送る JSON。文字列の壊れた絵文字は取り除く（xAI は片割れのサロゲートを含む JSON を 400 で弾く） */
+export function toRequestJson(value: unknown): string {
+  return JSON.stringify(value, (_key, v) => (typeof v === "string" ? toWellFormed(v) : v));
 }
 
 export function oneLine(text: string): string {
