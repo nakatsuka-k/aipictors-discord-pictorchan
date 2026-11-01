@@ -12,6 +12,16 @@ export type ChangelogEntry = {
 
 export const CHANGELOG: ChangelogEntry[] = [
   {
+    version: "2.1.0",
+    date: "2026-11-02",
+    title: "Aipictors と連携できるようになったよ🔗🥔",
+    items: [
+      "🏅 **連携すると名前の横にレベルや実績のバッジが付くよ！** サイトの設定から連携してね → https://www.aipictors.com/settings/discord",
+      "🪪 **/card** で実績カードを見せられるよ。ほかの人のカードも見られるよ（連携している人だけ）",
+    ],
+    pictorchanOnly: true,
+  },
+  {
     version: "2.0.2",
     date: "2026-10-30",
     title: "お絵かきの回数をふやしたよ🎨🥔",

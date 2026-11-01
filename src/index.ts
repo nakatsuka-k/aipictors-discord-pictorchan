@@ -17,6 +17,7 @@ import {
   type Message,
 } from "discord.js";
 import cron from "node-cron";
+import { fetchLinkedCard, notifyMemberJoined, toAchievementCardUrl } from "./aipictors-link";
 import { generateReply, type ReplyMode } from "./agent";
 import { CHANGELOG, CURRENT_VERSION, formatAnnouncement } from "./changelog";
 import {
@@ -186,6 +187,8 @@ client.on("messageDelete", async (msg) => {
 
 client.on("guildMemberAdd", (member) => {
   welcomeMember(client, member).catch(() => {});
+  // Aipictors と連携済みの人には、参加したらすぐバッジとレベルを付ける
+  notifyMemberJoined(member.id).catch(() => {});
 });
 
 // ──────────────────────────────────────────────────────────
@@ -215,6 +218,10 @@ const commands = [
   new SlashCommandBuilder().setName("forget_name").setDescription("あなたの呼び名を忘れます"),
   new SlashCommandBuilder().setName("namelist").setDescription("覚えている人の一覧を表示します"),
   new SlashCommandBuilder()
+    .setName("card")
+    .setDescription("Aipictors の実績カードを見せます（Discord 連携している人だけ）")
+    .addUserOption((o) => o.setName("user").setDescription("カードを見たい人（省略すると自分）")),
+  new SlashCommandBuilder()
     .setName("diary")
     .setDescription("指定日のぴくたーちゃん日記を投稿します")
     .addStringOption((o) => o.setName("date").setDescription("対象日。例: 2026-03-28 または 03.28").setRequired(true)),
@@ -240,9 +247,42 @@ const HELP_TEXT = [
   "- **他のチャンネルを見る**: 「#アート広場 で最近なに話してた？」「ここ一週間のまとめ」など",
   "- **検索**: 過去ログ検索・Web/X検索",
   "- **お絵かき**: 「〇〇描いて」（1人1日3枚まで）",
-  "- **コマンド**: /checkimage /gacha /iken /huguai /myname /forget /namelist /diary",
+  "- **コマンド**: /card /checkimage /gacha /iken /huguai /myname /forget /namelist /diary",
   `-# v${CURRENT_VERSION}`,
 ].join("\n");
+
+async function handleCard(interaction: ChatInputCommandInteraction) {
+  const target = interaction.options.getUser("user") ?? interaction.user;
+  await interaction.deferReply();
+  const card = await fetchLinkedCard(target.id);
+  if (!card || !card.isLinked) {
+    await interaction.editReply({
+      content:
+        target.id === interaction.user.id
+          ? "まだ Aipictors と連携してないみたい🥔 連携すると名前の横にバッジが付くよ！\nhttps://www.aipictors.com/settings/discord"
+          : `${target.displayName} さんはまだ Aipictors と連携してないみたい🥔`,
+      allowedMentions: { parse: [] },
+    });
+    return;
+  }
+  if (!card.isAchievementVisible) {
+    await interaction.editReply("この人は実績を非公開にしているよ🤫");
+    return;
+  }
+  const name = card.name ?? target.displayName;
+  await interaction.editReply({
+    allowedMentions: { parse: [] },
+    embeds: [
+      {
+        title: `${name} さんの実績カード`,
+        url: `https://www.aipictors.com/achievements?user=${card.userId}`,
+        description: `✦ **Lv.${card.level ?? 1}**　🏅 **実績 ${card.unlockedCount ?? 0} 個**`,
+        color: 0x5865f2,
+        image: { url: toAchievementCardUrl(card.userId!, card.unlockedCount ?? 0) },
+      },
+    ],
+  });
+}
 
 async function handleCheckImage(interaction: ChatInputCommandInteraction) {
   const image = interaction.options.getAttachment("image", true);
@@ -341,6 +381,9 @@ client.on("interactionCreate", async (interaction) => {
         break;
       case "namelist":
         await interaction.reply({ content: nameMemory.getAllNamesForDisplay().slice(0, 1990), ephemeral: true });
+        break;
+      case "card":
+        await handleCard(interaction);
         break;
       case "diary": {
         const targetDate = parseDiaryDateInput(interaction.options.getString("date", true));
