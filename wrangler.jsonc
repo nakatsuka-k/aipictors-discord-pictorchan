@@ -1,0 +1,53 @@
+{
+  "name": "pictorchan-bot",
+  "main": "cloudflare/worker.ts",
+  "compatibility_date": "2026-10-01",
+  "workers_dev": true,
+  "account_id": "7f2a200bf2994f36f45e733751a30be6",
+  "observability": {
+    "enabled": true
+  },
+  "triggers": {
+    "crons": [
+      "* * * * *"
+    ]
+  },
+  "vars": {
+    "CONTAINER_ENV_KEYS": "BUG_CH_ID,CLIENT_ID,DISCORD_BOT_API_TOKEN,DISCORD_TOKEN,GH_OWNER,GH_REPO,GH_TOKEN,GROK_API_KEY,NODE_ENV,OPINION_CH_ID,STATE_URL,ADMIN_TOKEN",
+    "CONTAINER_INSTANCE": "basic",
+    "STATE_URL": "https://pictorchan-bot.aipictors.workers.dev"
+  },
+  "r2_buckets": [
+    {
+      "binding": "STATE",
+      "bucket_name": "pictorchan-state"
+    }
+  ],
+  "containers": [
+    {
+      "class_name": "Runner",
+      "scheduling_policy": "durable_object",
+      "images": {
+        "base": {
+          "dockerfile": "./Dockerfile"
+        }
+      }
+    }
+  ],
+  "durable_objects": {
+    "bindings": [
+      {
+        "name": "RUNNER",
+        "class_name": "Runner"
+      }
+    ]
+  },
+  "migrations": [
+    {
+      "tag": "v1",
+      "new_sqlite_classes": [
+        "Runner"
+      ]
+    }
+  ]
+}

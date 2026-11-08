@@ -18,4 +18,5 @@ ENV NODE_ENV=production
 COPY --from=build /app/node_modules ./node_modules
 COPY --from=build /app/dist ./dist
 COPY package.json ./
-CMD ["node", "dist/index.js"]
+COPY cloudflare/supervisor.mjs ./cloudflare/supervisor.mjs
+CMD ["node", "cloudflare/supervisor.mjs"]

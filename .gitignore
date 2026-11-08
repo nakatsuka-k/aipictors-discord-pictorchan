@@ -7,3 +7,4 @@ node_modules
 src/.local.env
 .DS_Store
 dist
+.wrangler
