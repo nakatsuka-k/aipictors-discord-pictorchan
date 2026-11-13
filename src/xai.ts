@@ -70,7 +70,10 @@ export type ResponsesResult = {
   output: ResponseOutputItem[];
   text: string;
   costUsd: number;
+  usage: TokenUsage;
 };
+
+export type TokenUsage = { input: number; cached: number; output: number };
 
 export async function createResponse(params: {
   input: InputItem[];
@@ -80,11 +83,17 @@ export async function createResponse(params: {
   temperature?: number;
   /** 特定の関数を必ず呼ばせる */
   forceFunction?: string;
+  /** 同じ値の呼び出しは同じサーバーに送られ、前回と同じ書き出し（指示とツール定義）が割引（キャッシュ）になりやすい */
+  cacheKey?: string;
 }): Promise<ResponsesResult | null> {
   try {
     const res = await fetch(RESPONSES_ENDPOINT, {
       method: "POST",
-      headers: { "Content-Type": "application/json", Authorization: `Bearer ${GROK_API_KEY}` },
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${GROK_API_KEY}`,
+        ...(params.cacheKey ? { "x-grok-conv-id": params.cacheKey } : {}),
+      },
       body: toRequestJson({
         model: params.model ?? CHAT_MODEL,
         store: false,
@@ -100,7 +109,15 @@ export async function createResponse(params: {
       console.error("[xAI responses]", res.status, (await res.text()).slice(0, 800));
       return null;
     }
-    const json = (await res.json()) as { output?: ResponseOutputItem[]; usage?: { cost_in_usd_ticks?: number } };
+    const json = (await res.json()) as {
+      output?: ResponseOutputItem[];
+      usage?: {
+        cost_in_usd_ticks?: number;
+        input_tokens?: number;
+        output_tokens?: number;
+        input_tokens_details?: { cached_tokens?: number };
+      };
+    };
     const output = json.output ?? [];
     const text = output
       .filter((item) => item.type === "message")
@@ -109,7 +126,16 @@ export async function createResponse(params: {
       .map((c) => c.text ?? "")
       .join("\n")
       .trim();
-    return { output, text, costUsd: (json.usage?.cost_in_usd_ticks ?? 0) / 1e10 };
+    return {
+      output,
+      text,
+      costUsd: (json.usage?.cost_in_usd_ticks ?? 0) / 1e10,
+      usage: {
+        input: json.usage?.input_tokens ?? 0,
+        cached: json.usage?.input_tokens_details?.cached_tokens ?? 0,
+        output: json.usage?.output_tokens ?? 0,
+      },
+    };
   } catch (error) {
     console.error("[xAI responses] error", error);
     return null;

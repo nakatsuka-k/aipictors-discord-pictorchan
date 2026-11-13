@@ -3,7 +3,7 @@ import { CHAT_MODEL, MAX_AGENT_ROUNDS } from "./config";
 import { conversationMemory, nameMemory, notesMemory } from "./store";
 import { buildTools, formatMessage, loadMessageMedia, runTool, type MediaImage, type ToolContext } from "./tools";
 import { chooseRandom, getJapanTime, truncate } from "./util";
-import { createResponse, type InputContent, type InputItem } from "./xai";
+import { createResponse, type InputContent, type InputItem, type TokenUsage } from "./xai";
 
 export type ReplyMode = "mention" | "auto";
 
@@ -12,6 +12,7 @@ export type AgentReply = {
   files: ToolContext["files"];
   trace: string[];
   costUsd: number;
+  usage: TokenUsage;
 };
 
 // ──────────────────────────────────────────────────────────
@@ -214,6 +215,7 @@ export async function generateReply(msg: Message, mode: ReplyMode): Promise<Agen
   // 画像生成の依頼は最初のターンで必ずツールを呼ばせる（文章だけで「生成中」と言ってしまうのを防ぐ）
   const imageRequest = /(描いて|かいて|えがいて)|((画像|イラスト|絵)を?(生成|作って|つくって|出して))/.test(msg.content);
   let costUsd = 0;
+  const usage: TokenUsage = { input: 0, cached: 0, output: 0 };
   let finalText = "";
   let apiFailed = false;
 
@@ -226,6 +228,7 @@ export async function generateReply(msg: Message, mode: ReplyMode): Promise<Agen
       forceFunction: round === 0 && imageRequest ? "generate_image" : undefined,
       maxOutputTokens: 1200,
       temperature: isDev ? 0.3 : 0.85,
+      cacheKey: "pictorchan-chat",
     };
     // 一時的な失敗もあるので 1 回だけやり直す
     const result = (await createResponse(request)) ?? (await createResponse(request));
@@ -234,6 +237,9 @@ export async function generateReply(msg: Message, mode: ReplyMode): Promise<Agen
       break;
     }
     costUsd += result.costUsd;
+    usage.input += result.usage.input;
+    usage.cached += result.usage.cached;
+    usage.output += result.usage.output;
 
     const calls = result.output.filter((o) => o.type === "function_call");
     if (calls.length === 0) {
@@ -262,7 +268,7 @@ export async function generateReply(msg: Message, mode: ReplyMode): Promise<Agen
   }
 
   if (mode === "auto" && /^\s*\[SKIP\]\s*$/i.test(finalText)) {
-    return { text: null, files: ctx.files, trace: ctx.trace, costUsd };
+    return { text: null, files: ctx.files, trace: ctx.trace, costUsd, usage };
   }
   const text = postprocess(finalText.replace(/\[SKIP\]/gi, ""), emojis, isDev);
   // 失敗したときは黙らない（メンションなしの発言でも、返事が来ないと無視されたように見える）
@@ -272,14 +278,16 @@ export async function generateReply(msg: Message, mode: ReplyMode): Promise<Agen
       files: ctx.files,
       trace: [...ctx.trace, "api-failed"],
       costUsd,
+      usage,
     };
   }
-  if (!text && mode === "auto") return { text: null, files: ctx.files, trace: ctx.trace, costUsd };
+  if (!text && mode === "auto") return { text: null, files: ctx.files, trace: ctx.trace, costUsd, usage };
 
   return {
     text: text || "ごめんね、うまく考えがまとまらなかったよ🥺 もう一回言ってみて？",
     files: ctx.files,
     trace: ctx.trace,
     costUsd,
+    usage,
   };
 }

@@ -97,7 +97,7 @@ async function readYouTube(url: string, options: { withMedia?: boolean }): Promi
   if (options.withMedia !== false) {
     if (storyboardUrls.length > 0) {
       for (const [i, sheet] of storyboardUrls.entries()) {
-        const data = await imageUrlToDataUri(sheet);
+        const data = await imageUrlToDataUri(sheet, 2048);
         if (data) {
           images.push({
             url: data,

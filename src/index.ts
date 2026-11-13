@@ -145,7 +145,7 @@ client.on("messageCreate", async (msg: Message) => {
   try {
     const reply = await generateReply(msg, mode);
     console.log(
-      `[REPLY] ${mode} ch=${channel.name} user=${msg.author.id} ${Date.now() - startedAt}ms $${reply.costUsd.toFixed(4)} tools=[${reply.trace.join(", ")}] skip=${reply.text === null}`,
+      `[REPLY] ${mode} ch=${channel.name} user=${msg.author.id} ${Date.now() - startedAt}ms $${reply.costUsd.toFixed(4)} in=${reply.usage.input} cached=${reply.usage.cached} out=${reply.usage.output} tools=[${reply.trace.join(", ")}] skip=${reply.text === null}`,
     );
     if (reply.text === null) return;
 
@@ -291,7 +291,8 @@ async function handleCheckImage(interaction: ChatInputCommandInteraction) {
     return;
   }
   await interaction.deferReply();
-  const dataUri = await imageUrlToDataUri(image.url);
+  // 破綻を探すので、会話より大きいまま見せる
+  const dataUri = await imageUrlToDataUri(image.url, 2048);
   if (!dataUri) {
     await interaction.editReply("画像の取得か形式チェックで失敗しちゃった🥺");
     return;

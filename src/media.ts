@@ -107,22 +107,25 @@ async function withTempDir<T>(fn: (dir: string) => Promise<T>): Promise<T> {
   }
 }
 
-/** 画像URL → data URI（png/jpeg 以外は jpeg に変換、大きすぎる画像は縮小） */
-export async function imageUrlToDataUri(url: string): Promise<string | null> {
+/**
+ * 会話で見せる画像の長辺。xAI は画像の面積で課金する（2048px で約 2,300 トークン、1024px で約 1,000 トークン）
+ */
+export const CHAT_IMAGE_MAX_SIDE = 1024;
+
+/** 画像URL → data URI（長辺を maxSide までに縮小して jpeg にする） */
+export async function imageUrlToDataUri(url: string, maxSide = CHAT_IMAGE_MAX_SIDE): Promise<string | null> {
   try {
     const res = await safeFetch(url);
     if (!res.ok) return null;
     const buf = await readLimited(res, MAX_IMAGE_BYTES);
     const mime = sniffImageMime(buf);
     if (!mime) return null;
-    if ((mime === "image/png" || mime === "image/jpeg") && buf.byteLength <= 4 * 1024 * 1024) {
-      return `data:${mime};base64,${buf.toString("base64")}`;
-    }
     return await withTempDir(async (dir) => {
       const input = path.join(dir, "in");
       const output = path.join(dir, "out.jpg");
       fs.writeFileSync(input, buf);
-      await runFfmpeg(["-i", input, "-frames:v", "1", "-vf", "scale='min(2048,iw)':-2", "-q:v", "3", "-y", output]);
+      const scale = `scale='if(gt(iw,ih),min(${maxSide},iw),-2)':'if(gt(iw,ih),-2,min(${maxSide},ih))'`;
+      await runFfmpeg(["-i", input, "-frames:v", "1", "-vf", scale, "-q:v", "3", "-y", output]);
       return `data:image/jpeg;base64,${fs.readFileSync(output).toString("base64")}`;
     });
   } catch (error: any) {
