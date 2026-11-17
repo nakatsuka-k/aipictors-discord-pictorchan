@@ -1,5 +1,5 @@
 import { AttachmentBuilder, type Client, type GuildMember } from "discord.js";
-import { GROK_API_KEY, IMAGE_MODEL, WELCOME_CHANNEL_ID } from "./config";
+import { GROK_API_KEY, IMAGE_MODEL, RULES_CHANNEL_ID, WELCOME_CHANNEL_ID } from "./config";
 
 const ASPECT_RATIO = process.env.WELCOME_IMAGE_ASPECT_RATIO ?? "16:9";
 const RESOLUTION = process.env.WELCOME_IMAGE_RESOLUTION ?? "2k";
@@ -53,7 +53,7 @@ export async function welcomeMember(client: Client, member: GuildMember) {
     const channel: any = await client.channels.fetch(WELCOME_CHANNEL_ID);
     if (!channel?.isTextBased?.()) return;
     const userName = member.displayName || member.user.username;
-    const content = `🎉 **Welcome to Aipictors!** 🎉\n\n${member}さん、ご参加いただきありがとうございます！\nThank you for joining us, ${userName}!`;
+    const content = `🎉 **Welcome to Aipictors!** 🎉\n\n${member}さん、ご参加いただきありがとうございます！\nThank you for joining us, ${userName}!\n欢迎加入，${userName}！\n\n📜 <#${RULES_CHANNEL_ID}> ← まずはここ / Start here / 请先看这里`;
     const image = await generateWelcomeImage(userName);
     await channel.send(image ? { content, files: [image] } : content).catch(async (error: unknown) => {
       console.error("[WELCOME] send with image failed", error);

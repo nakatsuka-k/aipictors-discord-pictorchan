@@ -31,13 +31,18 @@ export const ENABLE_WEB_SEARCH = process.env.ENABLE_WEB_SEARCH !== "0";
 export const PICTORCHAN_CHANNEL_ID = process.env.PICTORCHAN_CH_ID ?? "1273078367293276233"; // 🌈ぴくたーちゃん（自動返信）
 export const ANNOUNCE_CHANNEL_ID = process.env.ANNOUNCE_CH_ID ?? "1130319028662050817";      // 📢お知らせ
 export const WELCOME_CHANNEL_ID = "1411268702552461313";
+export const RULES_CHANNEL_ID = "1572314565671260291"; // 📜rules・ルール・规则
 export const DIARY_CHANNEL_ID = process.env.DIARY_CH_ID ?? "1487156313015320709";
 
 // 反応しないチャンネル（返信しない。読むのは可）
 export const NO_INTERACT_CHANNEL_IDS = new Set<string>([
-  "1126570407420493927",
-  "1175754548397215744",
-  "1130319028662050817",
+  "1126570407420493927", // 🔧欲しい機能・不具合・意見（返信は dcauto の自動対応）
+  "1175754548397215744", // 📋なんでも質問してね
+  "1411251879614353449", // 📨お問い合わせガイド
+  "1572314570050244716", // ❓help-and-feedback（English）
+  "1572314580930265229", // ❓提问与反馈-help（中文）
+  "1130319028662050817", // 📢お知らせ
+  "1572314565671260291", // 📜rules
 ]);
 
 // ──────────────────────────────────────────────────────────
