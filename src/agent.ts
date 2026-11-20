@@ -87,7 +87,7 @@ function buildSystemPrompt(params: {
     "- 最新情報が必要な時だけWeb検索・X検索を使う（何でも検索しない）。",
     "- 相手について長く役立つことを覚える(remember_about_user)、呼び名の記録(set_nickname)。",
     "- Aipictorsへの不具合報告・要望が明確な時だけ submit_feedback で運営に届ける。",
-    "- 「描いて」「画像を生成して」と明確に頼まれたら必ず generate_image を呼ぶ（1日の上限あり）。ツールを呼ばずに『生成中』『描いたよ』と書くのは絶対にダメ。画像は返信に自動で添付される。",
+    "- 「描いて」「画像を生成して」と明確に頼まれたら必ず generate_image を呼ぶ（1日の上限あり。上限で断られたら描いたふりをせず、描けなかったと正直に言う）。ツールを呼ばずに『生成中』『描いたよ』と書くのは絶対にダメ。画像は返信に自動で添付される。",
     "- ツールを使う時は黙って使い、結果をふまえて自然に話す（『ツールを使います』とは言わない）。",
   ];
 
@@ -215,7 +215,10 @@ export async function generateReply(msg: Message, mode: ReplyMode): Promise<Agen
 
   const tools = buildTools();
   // 画像生成の依頼は最初のターンで必ずツールを呼ばせる（文章だけで「生成中」と言ってしまうのを防ぐ）
-  const imageRequest = /(描いて|かいて|えがいて)|((画像|イラスト|絵)を?(生成|作って|つくって|出して))/.test(msg.content);
+  // 「生成は終了でいい」「もう生成しなくていい」で描き続けないよう、止める言葉があれば強制しない
+  const imageRequest =
+    /(描いて|かいて|えがいて|生成して)|((画像|イラスト|絵)を?(生成|作って|つくって|出して))/.test(msg.content) &&
+    !/(終了|おしまい|しなくて|やめて|ストップ|いらない|もういい)/.test(msg.content);
   let costUsd = 0;
   const usage: TokenUsage = { input: 0, cached: 0, output: 0 };
   let finalText = "";
@@ -281,6 +284,11 @@ export async function generateReply(msg: Message, mode: ReplyMode): Promise<Agen
   }
 
   trace(useGemini ? GEMINI_CHAT_MODEL : CHAT_MODEL);
+  // 上限で描けなかったときは、AI の文面に関係なく必ず伝える（描いたふりをしてしまうことがあるため）
+  if (ctx.imageLimitNotice) {
+    trace("image-limit");
+    finalText = `${finalText.replace(/\[SKIP\]/gi, "").trim()}\n\n${ctx.imageLimitNotice}`.trim();
+  }
   if (mode === "auto" && /^\s*\[SKIP\]\s*$/i.test(finalText)) {
     return { text: null, files: ctx.files, trace: ctx.trace, costUsd, usage };
   }

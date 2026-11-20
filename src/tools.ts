@@ -33,6 +33,8 @@ export type ToolContext = {
   trace: string[];
   /** 同じ返信内で同じツール呼び出しを繰り返さないため */
   seenCalls?: Set<string>;
+  /** 画像生成が上限で断られたとき、返信に必ず添える案内 */
+  imageLimitNotice?: string;
 };
 
 export type MediaImage = { url: string; caption: string };
@@ -476,9 +478,13 @@ async function viewMedia(ctx: ToolContext, ref: string): Promise<ToolResult> {
 async function generateImage(ctx: ToolContext, prompt: string, aspectRatio: string): Promise<ToolResult> {
   const userKey = `img:${ctx.msg.author.id}`;
   if (usageCounter.get(userKey) >= IMAGE_GEN_PER_USER_PER_DAY) {
-    return { output: `今日はもう${IMAGE_GEN_PER_USER_PER_DAY}枚描いたから、また明日ね（上限）` };
+    ctx.imageLimitNotice = `🎨 今日のお絵かきは上限（1人1日${IMAGE_GEN_PER_USER_PER_DAY}枚）に達しちゃったから描けなかったの🙏 日本時間の0時にリセットされるから、また明日頼んでね`;
+    return { output: `上限のため描いていない。今日はもう${IMAGE_GEN_PER_USER_PER_DAY}枚描いたから、また明日ね。描いたふりはしないで、上限で描けないことを伝えて` };
   }
-  if (usageCounter.get("img:total") >= IMAGE_GEN_PER_DAY) return { output: "今日はサーバー全体の生成上限に達したよ" };
+  if (usageCounter.get("img:total") >= IMAGE_GEN_PER_DAY) {
+    ctx.imageLimitNotice = `🎨 今日はサーバー全体のお絵かき上限（1日${IMAGE_GEN_PER_DAY}枚）に達しちゃったから描けなかったの🙏 日本時間の0時にリセットされるから、また明日頼んでね`;
+    return { output: "上限のため描いていない。今日はサーバー全体の生成上限に達した。描いたふりはしないで、上限で描けないことを伝えて" };
+  }
   if (ctx.files.length > 0) return { output: "1回の返信で描けるのは1枚までだよ" };
 
   const res = await fetch("https://api.x.ai/v1/images/generations", {
