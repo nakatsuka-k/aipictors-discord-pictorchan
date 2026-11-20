@@ -79,3 +79,8 @@ export const USER_REQUESTS_PER_MINUTE = 6;
 // grok-imagine-image は 1 枚 $0.02。全員が上限まで使っても 1 日 $1.2 ほど
 export const IMAGE_GEN_PER_USER_PER_DAY = 10;
 export const IMAGE_GEN_PER_DAY = 60;
+// 特別な日だけ上限を変える（日本時間の日付）。その日が終われば自動でいつもの上限に戻る
+// 4 周年の日は 1 人 44 枚。全体は 44 枚 × 10 人ぶん（全員が上限まで使っても $8.8 ほど）
+export const IMAGE_GEN_SPECIAL_DAYS: Record<string, { perUser: number; total: number }> = {
+  "2026-11-21": { perUser: 44, total: 440 },
+};

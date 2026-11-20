@@ -12,6 +12,18 @@ export type ChangelogEntry = {
 
 export const CHANGELOG: ChangelogEntry[] = [
   {
+    version: "2.1.2",
+    date: "2026-11-21",
+    title: "Aipictors 4周年記念！今日だけお絵かき44枚🎉🥔",
+    items: [
+      "🎂 **Aipictors は今日で4周年！** いつも遊んでくれてありがとう🫶",
+      "🎨 **今日（11/21）だけ、1人44枚まで描けるよ！**（いつもは10枚）お祝いの絵、いっぱい頼んでね😆",
+      "🕛 日本時間の0時を過ぎたら、いつもの1人10枚に戻るよ",
+    ],
+    footer: "「4周年のお祝いの絵を描いて」って話しかけてね🎉",
+    pictorchanOnly: true,
+  },
+  {
     version: "2.1.1",
     date: "2026-11-20",
     title: "お絵かきの回数をまたふやしたよ🎨🥔",

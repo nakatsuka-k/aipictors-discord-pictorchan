@@ -12,12 +12,13 @@ import {
   GROK_API_KEY,
   IMAGE_GEN_PER_DAY,
   IMAGE_GEN_PER_USER_PER_DAY,
+  IMAGE_GEN_SPECIAL_DAYS,
   IMAGE_MODEL,
 } from "./config";
 import { postFeedback } from "./feedback";
 import { digestVideo, formatSeconds, imageUrlToDataUri, isImageAttachment, isVideoAttachment, type VideoDigest } from "./media";
 import { nameMemory, notesMemory, serverMessageLog, usageCounter } from "./store";
-import { sampleEvenly, shortJapanTime, truncate } from "./util";
+import { japanDateKey, sampleEvenly, shortJapanTime, truncate } from "./util";
 import { readUrl } from "./web";
 import type { FunctionTool, ResponseTool } from "./xai";
 
@@ -274,7 +275,7 @@ const FUNCTION_TOOLS: FunctionTool[] = [
     type: "function",
     name: "generate_image",
     description:
-      `イラストを生成して返信に添付する。相手が明確に「描いて」「画像作って」と頼んだ時だけ使う。1人1日${IMAGE_GEN_PER_USER_PER_DAY}枚まで。` +
+      `イラストを生成して返信に添付する。相手が明確に「描いて」「画像作って」と頼んだ時だけ使う。1人1日の枚数に上限あり。` +
       "性的・暴力的・実在人物・他者の著作物キャラの生成は断る。prompt は英語で具体的に。" +
       "ぴくたーちゃん自身を描く時は外見を必ず含める: cute anime girl, long multicolored hair with orange, blue and green tones, soft bangs, ahoge, vivid blue eyes, soft blush, stylish student uniform with a cute ribbon, cheerful smile。",
     parameters: {
@@ -475,14 +476,20 @@ async function viewMedia(ctx: ToolContext, ref: string): Promise<ToolResult> {
   return { output: "画像は次のメッセージで見せるよ", images: [{ url: data, caption: `【画像】「${entry?.label ?? "画像"}」` }] };
 }
 
+/** 今日のお絵かきの上限（特別な日はその日の上限） */
+export function imageGenLimits(now: Date = new Date()): { perUser: number; total: number } {
+  return IMAGE_GEN_SPECIAL_DAYS[japanDateKey(now)] ?? { perUser: IMAGE_GEN_PER_USER_PER_DAY, total: IMAGE_GEN_PER_DAY };
+}
+
 async function generateImage(ctx: ToolContext, prompt: string, aspectRatio: string): Promise<ToolResult> {
   const userKey = `img:${ctx.msg.author.id}`;
-  if (usageCounter.get(userKey) >= IMAGE_GEN_PER_USER_PER_DAY) {
-    ctx.imageLimitNotice = `🎨 今日のお絵かきは上限（1人1日${IMAGE_GEN_PER_USER_PER_DAY}枚）に達しちゃったから描けなかったの🙏 日本時間の0時にリセットされるから、また明日頼んでね`;
-    return { output: `上限のため描いていない。今日はもう${IMAGE_GEN_PER_USER_PER_DAY}枚描いたから、また明日ね。描いたふりはしないで、上限で描けないことを伝えて` };
+  const limits = imageGenLimits();
+  if (usageCounter.get(userKey) >= limits.perUser) {
+    ctx.imageLimitNotice = `🎨 今日のお絵かきは上限（1人1日${limits.perUser}枚）に達しちゃったから描けなかったの🙏 日本時間の0時にリセットされるから、また明日頼んでね`;
+    return { output: `上限のため描いていない。今日はもう${limits.perUser}枚描いたから、また明日ね。描いたふりはしないで、上限で描けないことを伝えて` };
   }
-  if (usageCounter.get("img:total") >= IMAGE_GEN_PER_DAY) {
-    ctx.imageLimitNotice = `🎨 今日はサーバー全体のお絵かき上限（1日${IMAGE_GEN_PER_DAY}枚）に達しちゃったから描けなかったの🙏 日本時間の0時にリセットされるから、また明日頼んでね`;
+  if (usageCounter.get("img:total") >= limits.total) {
+    ctx.imageLimitNotice = `🎨 今日はサーバー全体のお絵かき上限（1日${limits.total}枚）に達しちゃったから描けなかったの🙏 日本時間の0時にリセットされるから、また明日頼んでね`;
     return { output: "上限のため描いていない。今日はサーバー全体の生成上限に達した。描いたふりはしないで、上限で描けないことを伝えて" };
   }
   if (ctx.files.length > 0) return { output: "1回の返信で描けるのは1枚までだよ" };
@@ -512,7 +519,7 @@ async function generateImage(ctx: ToolContext, prompt: string, aspectRatio: stri
   usageCounter.increment(userKey);
   usageCounter.increment("img:total");
   ctx.files.push(new AttachmentBuilder(Buffer.from(b64, "base64"), { name: "pictorchan.jpg", description: truncate(prompt, 200) }));
-  const remaining = IMAGE_GEN_PER_USER_PER_DAY - usageCounter.get(userKey);
+  const remaining = limits.perUser - usageCounter.get(userKey);
   return {
     output: `生成できたよ。返信に自動で添付される（今日あと${remaining}枚）。描いた内容をひとこと添えて`,
     images: [{ url: `data:image/jpeg;base64,${b64}`, caption: "【あなたが今生成した画像】" }],
