@@ -53,7 +53,7 @@ export async function welcomeMember(client: Client, member: GuildMember) {
     const channel: any = await client.channels.fetch(WELCOME_CHANNEL_ID);
     if (!channel?.isTextBased?.()) return;
     const userName = member.displayName || member.user.username;
-    const content = `🎉 **Welcome to Aipictors!** 🎉\n\n${member}さん、ご参加いただきありがとうございます！\nThank you for joining us, ${userName}!\n欢迎加入，${userName}！\n\n📜 <#${RULES_CHANNEL_ID}> ← まずはここ / Start here / 请先看这里`;
+    const content = `🎉 **Welcome to Aipictors!** 🎉\n\n${member}さん、ご参加いただきありがとうございます！\nThank you for joining us, ${userName}!\n欢迎加入，${userName}！\nBenvenuto/a, ${userName}! / 환영합니다, ${userName}님!\n\n📜 <#${RULES_CHANNEL_ID}> ← まずはここ / Start here / 请先看这里 / Inizia da qui / 여기부터`;
     const image = await generateWelcomeImage(userName);
     await channel.send(image ? { content, files: [image] } : content).catch(async (error: unknown) => {
       console.error("[WELCOME] send with image failed", error);
