@@ -1,5 +1,6 @@
 import type { Guild, Message } from "discord.js";
-import { CHAT_MODEL, MAX_AGENT_ROUNDS } from "./config";
+import { CHAT_MODEL, GEMINI_CHAT_ENABLED, GEMINI_CHAT_MODEL, MAX_AGENT_ROUNDS } from "./config";
+import { createGeminiResponse, hasGeminiTurn, isGeminiAvailable } from "./gemini";
 import { conversationMemory, nameMemory, notesMemory } from "./store";
 import { buildTools, formatMessage, loadMessageMedia, runTool, type MediaImage, type ToolContext } from "./tools";
 import { chooseRandom, getJapanTime, truncate } from "./util";
@@ -219,6 +220,9 @@ export async function generateReply(msg: Message, mode: ReplyMode): Promise<Agen
   const usage: TokenUsage = { input: 0, cached: 0, output: 0 };
   let finalText = "";
   let apiFailed = false;
+  // 安い Gemini で始め、最初のラウンドで失敗・安全フィルターに止められたら、この返信は最後まで Grok
+  let useGemini = GEMINI_CHAT_ENABLED && isGeminiAvailable() && !isDev;
+  const trace = (label: string) => ctx.trace.push(label);
 
   for (let round = 0; round < MAX_AGENT_ROUNDS; round++) {
     const lastRound = round === MAX_AGENT_ROUNDS - 1;
@@ -232,7 +236,15 @@ export async function generateReply(msg: Message, mode: ReplyMode): Promise<Agen
       cacheKey: "pictorchan-chat",
     };
     // 一時的な失敗もあるので 1 回だけやり直す
-    const result = (await createResponse(request)) ?? (await createResponse(request));
+    let result = null;
+    if (useGemini) {
+      result = (await createGeminiResponse(request)) ?? (await createGeminiResponse(request));
+      if (!result && !hasGeminiTurn(input)) {
+        useGemini = false;
+        trace("gemini-fallback");
+      }
+    }
+    if (!useGemini) result = (await createResponse(request)) ?? (await createResponse(request));
     if (!result) {
       apiFailed = true;
       break;
@@ -268,6 +280,7 @@ export async function generateReply(msg: Message, mode: ReplyMode): Promise<Agen
     if (result.text && lastRound) finalText = result.text;
   }
 
+  trace(useGemini ? GEMINI_CHAT_MODEL : CHAT_MODEL);
   if (mode === "auto" && /^\s*\[SKIP\]\s*$/i.test(finalText)) {
     return { text: null, files: ctx.files, trace: ctx.trace, costUsd, usage };
   }

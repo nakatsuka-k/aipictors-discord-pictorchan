@@ -22,6 +22,12 @@ export const TEXT_MODEL = process.env.TEXT_MODEL ?? CHAT_MODEL;
 export const VISION_MODEL = process.env.GROK_VISION_MODEL ?? "grok-4.20-0309-reasoning";
 export const IMAGE_MODEL = process.env.WELCOME_IMAGE_MODEL ?? "grok-imagine-image";
 
+// 会話・日記・意見整理は安い Gemini を先に使い、失敗・安全フィルターで止まったら Grok（GEMINI_API_KEY が無ければ Grok だけ）
+export const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
+export const GEMINI_CHAT_MODEL = process.env.GEMINI_CHAT_MODEL ?? "gemini-3.5-flash-lite";
+// 0 で Gemini を使わない（すぐ Grok に戻す用）
+export const GEMINI_CHAT_ENABLED = process.env.GEMINI_CHAT !== "0";
+
 // サーバー側ツール（xAI が実行・課金）
 export const ENABLE_WEB_SEARCH = process.env.ENABLE_WEB_SEARCH !== "0";
 

@@ -1,4 +1,5 @@
-import { CHAT_MODEL, GROK_API_KEY, TEXT_MODEL, VISION_MODEL } from "./config";
+import { CHAT_MODEL, GEMINI_CHAT_ENABLED, GROK_API_KEY, TEXT_MODEL, VISION_MODEL } from "./config";
+import { geminiText, isGeminiAvailable } from "./gemini";
 import { toRequestJson } from "./util";
 
 const CHAT_ENDPOINT = "https://api.x.ai/v1/chat/completions";
@@ -6,11 +7,15 @@ const RESPONSES_ENDPOINT = "https://api.x.ai/v1/responses";
 
 type ChatResponse = { choices?: { message?: { content?: string } }[] };
 
-/** 単発のテキスト生成（日記・整形など） */
+/** 単発のテキスト生成（日記・整形など）。安い Gemini を先に使い、だめなら Grok */
 export async function chatText(
   messages: Array<{ role: "system" | "user" | "assistant"; content: string }>,
   options: { model?: string; maxTokens?: number; temperature?: number } = {},
 ): Promise<string | null> {
+  if (!options.model && GEMINI_CHAT_ENABLED && isGeminiAvailable()) {
+    const text = await geminiText(messages, options);
+    if (text) return text;
+  }
   try {
     const res = await fetch(CHAT_ENDPOINT, {
       method: "POST",
