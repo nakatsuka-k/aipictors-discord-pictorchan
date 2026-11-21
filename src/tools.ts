@@ -13,6 +13,7 @@ import {
   IMAGE_GEN_PER_DAY,
   IMAGE_GEN_PER_USER_PER_DAY,
   IMAGE_GEN_SPECIAL_DAYS,
+  IMAGE_GEN_SPECIAL_USERS,
   IMAGE_MODEL,
 } from "./config";
 import { postFeedback } from "./feedback";
@@ -476,14 +477,17 @@ async function viewMedia(ctx: ToolContext, ref: string): Promise<ToolResult> {
   return { output: "画像は次のメッセージで見せるよ", images: [{ url: data, caption: `【画像】「${entry?.label ?? "画像"}」` }] };
 }
 
-/** 今日のお絵かきの上限（特別な日はその日の上限） */
-export function imageGenLimits(now: Date = new Date()): { perUser: number; total: number } {
-  return IMAGE_GEN_SPECIAL_DAYS[japanDateKey(now)] ?? { perUser: IMAGE_GEN_PER_USER_PER_DAY, total: IMAGE_GEN_PER_DAY };
+/** 今日のお絵かきの上限（特別な日はその日の上限。userId を渡すと、その人だけの特別な上限も反映） */
+export function imageGenLimits(now: Date = new Date(), userId?: string): { perUser: number; total: number } {
+  const day = japanDateKey(now);
+  const limits = IMAGE_GEN_SPECIAL_DAYS[day] ?? { perUser: IMAGE_GEN_PER_USER_PER_DAY, total: IMAGE_GEN_PER_DAY };
+  const special = userId ? IMAGE_GEN_SPECIAL_USERS[day]?.[userId] : undefined;
+  return special === undefined ? limits : { ...limits, perUser: special };
 }
 
 async function generateImage(ctx: ToolContext, prompt: string, aspectRatio: string): Promise<ToolResult> {
   const userKey = `img:${ctx.msg.author.id}`;
-  const limits = imageGenLimits();
+  const limits = imageGenLimits(new Date(), ctx.msg.author.id);
   if (usageCounter.get(userKey) >= limits.perUser) {
     ctx.imageLimitNotice = `🎨 今日のお絵かきは上限（1人1日${limits.perUser}枚）に達しちゃったから描けなかったの🙏 日本時間の0時にリセットされるから、また明日頼んでね`;
     return { output: `上限のため描いていない。今日はもう${limits.perUser}枚描いたから、また明日ね。描いたふりはしないで、上限で描けないことを伝えて` };

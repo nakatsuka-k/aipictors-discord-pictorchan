@@ -84,5 +84,10 @@ export const IMAGE_GEN_PER_DAY = 60;
 // 特別な日だけ上限を変える（日本時間の日付）。その日が終われば自動でいつもの上限に戻る
 // 4 周年の日は 1 人 44 枚。全体は 44 枚 × 10 人ぶん（全員が上限まで使っても $8.8 ほど）
 export const IMAGE_GEN_SPECIAL_DAYS: Record<string, { perUser: number; total: number }> = {
-  "2026-11-21": { perUser: 44, total: 440 },
+  "2026-11-21": { perUser: 44, total: 500 },
+};
+// 特別な日にだけ、決まった人の上限を変える（日本時間の日付 → Discord のユーザー ID → 1 日の枚数）
+// 2026-11-21: ウンダバー＿さん（undaba_）を 100 枚に（オーナー依頼。全体の上限は 500 枚に広げた）
+export const IMAGE_GEN_SPECIAL_USERS: Record<string, Record<string, number>> = {
+  "2026-11-21": { "1308813531218706433": 100 },
 };
