@@ -1,11 +1,6 @@
-import { AttachmentBuilder, ChannelType, type Attachment, type Client } from "discord.js";
+import { cache, ChannelType, discord, isTextChannel, messageUrl, sendMessage, type Attachment, type FileData } from "./discord";
 import { BUG_CH_ID, GH_OWNER, GH_REPO, GH_TOKEN, OPINION_CH_ID } from "./config";
 import { chatText } from "./xai";
-
-let discordClient: Client | null = null;
-export function setFeedbackClient(client: Client) {
-  discordClient = client;
-}
 
 async function createGitHubIssue(title: string, body: string, labels: string[]): Promise<{ url: string; number: number } | null> {
   if (!GH_TOKEN || !GH_OWNER || !GH_REPO) return null;
@@ -40,13 +35,13 @@ export async function postFeedback(params: {
   attachments?: Attachment[];
 }): Promise<{ posted: boolean; message: string }> {
   const channelId = params.kind === "opinion" ? OPINION_CH_ID : BUG_CH_ID;
-  if (!channelId || !discordClient) return { posted: false, message: "投稿先チャンネルが設定されていないよ" };
+  if (!channelId) return { posted: false, message: "投稿先チャンネルが設定されていないよ" };
 
   const title = (params.title || (params.kind === "opinion" ? "意見・要望" : "不具合報告")).slice(0, 90);
   const label = params.kind === "opinion" ? "ご意見フォーラム" : "不具合フォーラム";
 
   try {
-    const channel: any = await discordClient.channels.fetch(channelId);
+    const channel = await cache.getChannel(channelId);
     if (!channel) return { posted: false, message: "チャンネルが見つからないよ" };
 
     const labels = params.kind === "opinion" ? ["enhancement", "user-feedback"] : ["bug", "user-report"];
@@ -55,11 +50,11 @@ export async function postFeedback(params: {
     let postContent = `${params.content}\n\n*投稿者: ${params.userTag}*`;
     if (issue) postContent += `\n\n🔗 GitHub Issue: ${issue.url}`;
 
-    const files: AttachmentBuilder[] = [];
+    const files: FileData[] = [];
     for (const att of (params.attachments ?? []).slice(0, 4)) {
       try {
         const res = await fetch(att.url);
-        if (res.ok) files.push(new AttachmentBuilder(Buffer.from(await res.arrayBuffer()), { name: att.name || "attachment" }));
+        if (res.ok) files.push({ name: att.filename || "attachment", data: new Uint8Array(await res.arrayBuffer()) });
       } catch (error) {
         console.error("[FEEDBACK] attachment error", error);
       }
@@ -67,14 +62,16 @@ export async function postFeedback(params: {
 
     let url = "";
     if (channel.type === ChannelType.GuildForum) {
-      const thread = await channel.threads.create({
-        name: title,
-        message: { content: postContent.slice(0, 1990), files: files.length ? files : undefined },
-      });
-      url = thread.url;
-    } else if (channel.isTextBased?.()) {
-      const sent = await channel.send({ content: `**${title}**\n\n${postContent}`.slice(0, 1990), files: files.length ? files : undefined });
-      url = sent.url;
+      const thread = await discord<{ id: string; guild_id?: string }>(
+        "POST",
+        `/channels/${channel.id}/threads`,
+        { name: title, message: { content: postContent.slice(0, 1990), allowed_mentions: { parse: [] } } },
+        files.length ? files : undefined,
+      );
+      url = `https://discord.com/channels/${thread.guild_id ?? channel.guild_id}/${thread.id}`;
+    } else if (isTextChannel(channel)) {
+      const sent = await sendMessage(channel.id, { content: `**${title}**\n\n${postContent}`.slice(0, 1990), files: files.length ? files : undefined });
+      url = messageUrl(sent, channel.guild_id);
     } else {
       return { posted: false, message: "サポートされていないチャンネルタイプだよ" };
     }

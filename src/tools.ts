@@ -1,12 +1,21 @@
 import {
-  AttachmentBuilder,
+  authorName,
+  base64ToBytes,
+  cache,
   ChannelType,
-  GuildMember,
-  Message,
-  PermissionFlagsBits,
-  type Guild,
-  type GuildBasedChannel,
-} from "discord.js";
+  fetchMessage,
+  fetchMessages as fetchChannelMessages,
+  hasPermissions,
+  isTextChannel,
+  isThread,
+  memberDisplayName,
+  Permission,
+  permissionsFor,
+  type Channel,
+  type FileData,
+  type GuildState,
+  type Message,
+} from "./discord";
 import {
   ENABLE_WEB_SEARCH,
   GROK_API_KEY,
@@ -25,12 +34,13 @@ import type { FunctionTool, ResponseTool } from "./xai";
 
 export type ToolContext = {
   msg: Message;
-  guild: Guild;
-  member: GuildMember;
+  guild: GuildState;
+  /** 話しかけてきた人（権限の計算と呼び名に使う） */
+  member: { id: string; displayName: string; roles: string[] };
   /** 会話中に出てきたメディアの短い参照ID → URL */
   media: Map<string, { url: string; kind: "image" | "video" | "unknown"; label: string }>;
   /** 返信に添付するファイル（画像生成など） */
-  files: AttachmentBuilder[];
+  files: FileData[];
   /** 実行したツールの記録（ログ用） */
   trace: string[];
   /** 同じ返信内で同じツール呼び出しを繰り返さないため */
@@ -65,8 +75,8 @@ export function videoSummary(name: string, digest: VideoDigest): string {
 export async function loadMessageMedia(m: Message, limit: number): Promise<{ images: MediaImage[]; notes: string[] }> {
   const images: MediaImage[] = [];
   const notes: string[] = [];
-  for (const att of Array.from(m.attachments.values()).slice(0, limit)) {
-    const name = att.name ?? "file";
+  for (const att of (m.attachments ?? []).slice(0, limit)) {
+    const name = att.filename ?? "file";
     if (isImageAttachment(att)) {
       const data = await imageUrlToDataUri(att.url);
       if (data) images.push({ url: data, caption: `【画像】「${name}」` });
@@ -91,79 +101,87 @@ export function registerMedia(ctx: ToolContext, url: string, kind: "image" | "vi
 }
 
 export function formatMessage(ctx: ToolContext, m: Message, botId: string): string {
-  const name = m.author.id === botId ? "ぴくたーちゃん(あなた)" : (m.member?.displayName ?? m.author.displayName ?? m.author.username);
+  const name = m.author.id === botId ? "ぴくたーちゃん(あなた)" : authorName(m);
   const parts: string[] = [];
   const content = m.content
-    ?.replace(/<@!?(\d+)>/g, (_, id) => `@${m.mentions.users.get(id)?.displayName ?? m.guild?.members.cache.get(id)?.displayName ?? "誰か"}`)
-    .replace(/<#(\d+)>/g, (_, id) => `#${m.guild?.channels.cache.get(id)?.name ?? id}`)
+    ?.replace(/<@!?(\d+)>/g, (_, id) => {
+      const user = m.mentions?.find((u) => u.id === id) ?? cache.guilds.get(ctx.guild.id)?.members.get(id)?.user;
+      return `@${user ? memberDisplayName(ctx.guild.id, user) : "誰か"}`;
+    })
+    .replace(/<#(\d+)>/g, (_, id) => `#${cache.channels.get(id)?.name ?? id}`)
     .trim();
   if (content) parts.push(truncate(content, 600));
-  for (const att of m.attachments.values()) {
+  for (const att of m.attachments ?? []) {
     const kind = isImageAttachment(att) ? "image" : isVideoAttachment(att) ? "video" : "unknown";
-    const ref = registerMedia(ctx, att.url, kind, att.name ?? "file");
-    parts.push(`[${kind === "image" ? "画像" : kind === "video" ? "動画" : "ファイル"} ${att.name ?? ""} → ${ref}]`);
+    const ref = registerMedia(ctx, att.url, kind, att.filename ?? "file");
+    parts.push(`[${kind === "image" ? "画像" : kind === "video" ? "動画" : "ファイル"} ${att.filename ?? ""} → ${ref}]`);
   }
-  for (const embed of m.embeds.slice(0, 2)) {
+  for (const embed of (m.embeds ?? []).slice(0, 2)) {
     const text = [embed.title, embed.description].filter(Boolean).join(" - ");
     if (text) parts.push(`[埋め込み: ${truncate(text, 200)}]`);
     const img = embed.image?.url ?? embed.thumbnail?.url;
     if (img && !embed.video) parts.push(`[埋め込み画像 → ${registerMedia(ctx, img, "image", "embed")}]`);
     if (embed.video?.url) parts.push(`[埋め込み動画 ${embed.url ?? ""}]`);
   }
-  for (const sticker of m.stickers.values()) parts.push(`[スタンプ: ${sticker.name}]`);
-  const reply = m.reference?.messageId ? " (返信)" : "";
-  return `[${shortJapanTime(m.createdTimestamp)}] ${name}${reply}: ${parts.join(" ") || "(空)"}`;
+  for (const sticker of m.sticker_items ?? []) parts.push(`[スタンプ: ${sticker.name}]`);
+  const reply = m.message_reference?.message_id ? " (返信)" : "";
+  return `[${shortJapanTime(Date.parse(m.timestamp))}] ${name}${reply}: ${parts.join(" ") || "(空)"}`;
 }
 
 // ──────────────────────────────────────────────────────────
 // 権限（質問した人が見られるチャンネルだけ読む）
 // ──────────────────────────────────────────────────────────
-function canRead(ctx: ToolContext, channel: GuildBasedChannel | null | undefined): boolean {
-  if (!channel || channel.guildId !== ctx.guild.id) return false;
-  const me = ctx.guild.members.me;
-  const needed = [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.ReadMessageHistory];
-  return Boolean(channel.permissionsFor(ctx.member)?.has(needed) && me && channel.permissionsFor(me)?.has(needed));
+function canRead(ctx: ToolContext, channel: Channel | null | undefined): boolean {
+  if (!channel || channel.guild_id !== ctx.guild.id) return false;
+  const me = ctx.guild.members.get(cache.botId);
+  const needed = [Permission.ViewChannel, Permission.ReadMessageHistory];
+  return Boolean(
+    me &&
+      hasPermissions(permissionsFor(ctx.guild, channel, ctx.member.id, ctx.member.roles), needed) &&
+      hasPermissions(permissionsFor(ctx.guild, channel, cache.botId, me.roles), needed),
+  );
 }
 
 function normalizeName(value: string): string {
   return value.toLowerCase().replace(/[^\p{L}\p{N}]/gu, "");
 }
 
-async function resolveChannel(ctx: ToolContext, query: string): Promise<GuildBasedChannel | null> {
+const guildChannels = (ctx: ToolContext) => Array.from(cache.channels.values()).filter((c) => c.guild_id === ctx.guild.id);
+
+async function resolveChannel(ctx: ToolContext, query: string): Promise<Channel | null> {
   const q = (query ?? "").trim();
   const id = q.match(/(\d{15,})/)?.[1];
   if (id) {
-    const ch = ctx.guild.channels.cache.get(id) ?? (await ctx.guild.channels.fetch(id).catch(() => null));
+    const ch = await cache.getChannel(id);
     return ch && canRead(ctx, ch) ? ch : null;
   }
-  if (/^(ここ|この|今の|現在|this|current)/i.test(q)) return ctx.msg.channel as GuildBasedChannel;
+  if (/^(ここ|この|今の|現在|this|current)/i.test(q)) return cache.getChannel(ctx.msg.channel_id);
 
   const target = normalizeName(q.replace(/^#/, ""));
   if (!target) return null;
-  const candidates = Array.from(ctx.guild.channels.cache.values()).filter(
-    (c) => "messages" in c && canRead(ctx, c),
-  );
+  const candidates = guildChannels(ctx).filter((c) => isTextChannel(c) && canRead(ctx, c));
+  const nameOf = (c: Channel) => normalizeName(c.name ?? "");
   return (
-    candidates.find((c) => normalizeName(c.name) === target) ??
-    candidates.find((c) => normalizeName(c.name).includes(target)) ??
-    candidates.find((c) => target.includes(normalizeName(c.name)) && normalizeName(c.name).length >= 2) ??
+    candidates.find((c) => nameOf(c) === target) ??
+    candidates.find((c) => nameOf(c).includes(target)) ??
+    candidates.find((c) => target.includes(nameOf(c)) && nameOf(c).length >= 2) ??
     null
   );
 }
 
-async function fetchMessages(channel: any, limit: number, sinceTimestamp: number): Promise<Message[]> {
+async function fetchMessages(channelId: string, limit: number, sinceTimestamp: number): Promise<Message[]> {
   const collected: Message[] = [];
   let before: string | undefined;
   while (collected.length < limit) {
-    const batch = await channel.messages.fetch({ limit: Math.min(100, limit - collected.length), ...(before ? { before } : {}) });
-    if (!batch || batch.size === 0) break;
-    const items = Array.from(batch.values() as Iterable<Message>).sort((a, b) => b.createdTimestamp - a.createdTimestamp);
+    const batch = await fetchChannelMessages(channelId, { limit: Math.min(100, limit - collected.length), before });
+    if (!batch || batch.length === 0) break;
+    const items = batch.sort((a, b) => Date.parse(b.timestamp) - Date.parse(a.timestamp));
     for (const item of items) {
-      if (item.createdTimestamp < sinceTimestamp) return collected.reverse();
+      if (Date.parse(item.timestamp) < sinceTimestamp) return collected.reverse();
       collected.push(item);
     }
     before = items[items.length - 1].id;
-    if (batch.size < 100) break;
+    if (batch.length < 100) break;
   }
   return collected.reverse();
 }
@@ -338,8 +356,8 @@ export async function runTool(ctx: ToolContext, name: string, rawArgs: string): 
           kind,
           title: String(args.title ?? ""),
           content: String(args.content ?? ""),
-          userTag: `${ctx.msg.author.tag} (${ctx.msg.author.id})`,
-          attachments: Array.from(ctx.msg.attachments.values()),
+          userTag: `${userTag(ctx.msg.author)} (${ctx.msg.author.id})`,
+          attachments: ctx.msg.attachments ?? [],
         });
         return { output: result.posted ? `投稿できたよ。返信にこのリンクをそのまま含めて: ${result.message}` : `投稿に失敗: ${result.message}` };
       }
@@ -355,26 +373,28 @@ export async function runTool(ctx: ToolContext, name: string, rawArgs: string): 
 }
 
 function listChannels(ctx: ToolContext): ToolResult {
-  const channels = Array.from(ctx.guild.channels.cache.values())
-    .filter((c) => c.type !== ChannelType.GuildCategory && "messages" in c && !c.isThread() && canRead(ctx, c))
-    .sort((a: any, b: any) => (a.parent?.position ?? -1) - (b.parent?.position ?? -1) || (a.position ?? 0) - (b.position ?? 0));
-  const lines = channels.map((c: any) => {
+  const position = (id: string | null | undefined) => (id ? (cache.channels.get(id)?.position ?? -1) : -1);
+  const channels = guildChannels(ctx)
+    .filter((c) => c.type !== ChannelType.GuildCategory && isTextChannel(c) && !isThread(c) && canRead(ctx, c))
+    .sort((a, b) => position(a.parent_id) - position(b.parent_id) || (a.position ?? 0) - (b.position ?? 0));
+  const lines = channels.map((c) => {
     const topic = c.topic ? ` - ${truncate(c.topic.replace(/\s+/g, " "), 60)}` : "";
-    return `${c.parent?.name ?? "-"} / #${c.name} (id:${c.id})${topic}`;
+    const parent = c.parent_id ? cache.channels.get(c.parent_id)?.name : undefined;
+    return `${parent ?? "-"} / #${c.name} (id:${c.id})${topic}`;
   });
   return { output: lines.join("\n") || "読めるチャンネルが見つからなかったよ" };
 }
 
 async function readChannel(ctx: ToolContext, query: string, hours: number, limit: number): Promise<ToolResult> {
-  const channel: any = await resolveChannel(ctx, query);
+  const channel = await resolveChannel(ctx, query);
   if (!channel) return { output: `「${query}」というチャンネルが見つからないか、見る権限がないよ。list_channels で確認してね` };
-  if (!channel.messages?.fetch) return { output: "そのチャンネルはメッセージを読めない種類だよ" };
+  if (!isTextChannel(channel)) return { output: "そのチャンネルはメッセージを読めない種類だよ" };
 
   const since = Date.now() - Math.min(336, Math.max(1, hours)) * 3600_000;
-  const messages = await fetchMessages(channel, Math.min(300, Math.max(5, limit)), since);
+  const messages = await fetchMessages(channel.id, Math.min(300, Math.max(5, limit)), since);
   if (messages.length === 0) return { output: `#${channel.name} にはその期間のメッセージがなかったよ` };
 
-  const botId = ctx.msg.client.user!.id;
+  const botId = cache.botId;
   const shown = sampleEvenly(messages, 150);
   const header = `#${channel.name} の直近${hours}時間（${messages.length}件${shown.length < messages.length ? `中${shown.length}件を等間隔で抜粋` : ""}）`;
   return { output: `${header}\n${shown.map((m) => formatMessage(ctx, m, botId)).join("\n")}` };
@@ -390,7 +410,7 @@ function searchMessages(ctx: ToolContext, args: any): ToolResult {
   const readable = new Map<string, boolean>();
   const isReadable = (channelId: string, parentId: string | null) => {
     const key = parentId ?? channelId;
-    if (!readable.has(key)) readable.set(key, canRead(ctx, ctx.guild.channels.cache.get(key)));
+    if (!readable.has(key)) readable.set(key, canRead(ctx, cache.channels.get(key)));
     return readable.get(key)!;
   };
 
@@ -416,14 +436,14 @@ async function readDiscordMessageLink(ctx: ToolContext, url: string): Promise<To
   if (!match) return null;
   const [, guildId, channelId, messageId] = match;
   if (guildId !== ctx.guild.id) return { output: "別のサーバーのリンクは見られないよ" };
-  const channel: any = await resolveChannel(ctx, channelId);
+  const channel = await resolveChannel(ctx, channelId);
   if (!channel) return { output: "そのリンク先は見る権限がないか、見つからなかったよ" };
   if (!messageId) return readChannel(ctx, channelId, 48, 40);
 
-  const target: Message = await channel.messages.fetch(messageId);
-  const around: Message[] = Array.from((await channel.messages.fetch({ limit: 6, before: messageId })).values() as Iterable<Message>)
-    .sort((a, b) => a.createdTimestamp - b.createdTimestamp);
-  const botId = ctx.msg.client.user!.id;
+  const target = await fetchMessage(channel.id, messageId);
+  const around = (await fetchChannelMessages(channel.id, { limit: 6, before: messageId }))
+    .sort((a, b) => Date.parse(a.timestamp) - Date.parse(b.timestamp));
+  const botId = cache.botId;
   const { images, notes } = await loadMessageMedia(target, 3);
   return {
     output: [
@@ -477,6 +497,11 @@ async function viewMedia(ctx: ToolContext, ref: string): Promise<ToolResult> {
   return { output: "画像は次のメッセージで見せるよ", images: [{ url: data, caption: `【画像】「${entry?.label ?? "画像"}」` }] };
 }
 
+/** discord.js の user.tag と同じ（新しいユーザー名は # なし） */
+export function userTag(user: { username: string; discriminator?: string }): string {
+  return user.discriminator && user.discriminator !== "0" ? `${user.username}#${user.discriminator}` : user.username;
+}
+
 /** 今日のお絵かきの上限（特別な日はその日の上限。userId を渡すと、その人だけの特別な上限も反映） */
 export function imageGenLimits(now: Date = new Date(), userId?: string): { perUser: number; total: number } {
   const day = japanDateKey(now);
@@ -522,7 +547,7 @@ async function generateImage(ctx: ToolContext, prompt: string, aspectRatio: stri
 
   usageCounter.increment(userKey);
   usageCounter.increment("img:total");
-  ctx.files.push(new AttachmentBuilder(Buffer.from(b64, "base64"), { name: "pictorchan.jpg", description: truncate(prompt, 200) }));
+  ctx.files.push({ name: "pictorchan.jpg", data: base64ToBytes(b64), description: truncate(prompt, 200) });
   const remaining = limits.perUser - usageCounter.get(userKey);
   return {
     output: `生成できたよ。返信に自動で添付される（今日あと${remaining}枚）。描いた内容をひとこと添えて`,

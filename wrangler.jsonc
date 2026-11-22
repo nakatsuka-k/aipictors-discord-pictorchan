@@ -2,6 +2,7 @@
   "name": "pictorchan-bot",
   "main": "cloudflare/worker.ts",
   "compatibility_date": "2026-10-01",
+  "compatibility_flags": ["nodejs_compat"],
   "workers_dev": true,
   "account_id": "7f2a200bf2994f36f45e733751a30be6",
   "observability": {
@@ -23,13 +24,21 @@
       "bucket_name": "pictorchan-state"
     }
   ],
+  // 画像の縮小（Cloudflare Images）と動画のコマ切り出し（Media Transformations）
+  "images": {
+    "binding": "IMAGES"
+  },
+  "media": {
+    "binding": "MEDIA"
+  },
+  // 前の Container 版（戻すとき用。普段は止めてある）。イメージは最後に使っていたものを digest で固定
   "containers": [
     {
       "class_name": "Runner",
       "scheduling_policy": "durable_object",
       "images": {
         "base": {
-          "dockerfile": "./Dockerfile"
+          "image": "registry.cloudflare.com/7f2a200bf2994f36f45e733751a30be6/pictorchan-bot-runner-base@sha256:4c9cf9d6a1075b61624b082c1e63169d6681222cb706ef1ee856220ba67c2016"
         }
       }
     }
@@ -39,6 +48,10 @@
       {
         "name": "RUNNER",
         "class_name": "Runner"
+      },
+      {
+        "name": "BOT",
+        "class_name": "Bot"
       }
     ]
   },
@@ -47,6 +60,12 @@
       "tag": "v1",
       "new_sqlite_classes": [
         "Runner"
+      ]
+    },
+    {
+      "tag": "v2",
+      "new_sqlite_classes": [
+        "Bot"
       ]
     }
   ]

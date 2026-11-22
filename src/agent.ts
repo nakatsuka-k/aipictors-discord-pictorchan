@@ -1,4 +1,4 @@
-import type { Guild, Message } from "discord.js";
+import { authorName, cache, emojiToString, fetchMessage, fetchMessages, isThread, type GuildState, type Message } from "./discord";
 import { CHAT_MODEL, GEMINI_CHAT_ENABLED, GEMINI_CHAT_MODEL, MAX_AGENT_ROUNDS } from "./config";
 import { createGeminiResponse, hasGeminiTurn, isGeminiAvailable } from "./gemini";
 import { conversationMemory, nameMemory, notesMemory } from "./store";
@@ -30,10 +30,10 @@ const SERVER_EMOJI_HINTS: Record<string, string> = {
   syokuyoku: "食欲", dekkai: "でっかい", hoshi: "星",
 };
 
-function availableServerEmojis(guild: Guild): Map<string, string> {
+function availableServerEmojis(guild: GuildState): Map<string, string> {
   const map = new Map<string, string>();
-  for (const emoji of guild.emojis.cache.values()) {
-    if (emoji.name && SERVER_EMOJI_HINTS[emoji.name] && emoji.available !== false) map.set(emoji.name, emoji.toString());
+  for (const emoji of guild.emojis.values()) {
+    if (emoji.name && SERVER_EMOJI_HINTS[emoji.name] && emoji.available !== false) map.set(emoji.name, emojiToString(emoji));
   }
   return map;
 }
@@ -48,9 +48,10 @@ function buildSystemPrompt(params: {
   emojis: Map<string, string>;
 }): string {
   const { msg, mode, isDev, emojis } = params;
-  const channel: any = msg.channel;
-  const channelLabel = channel?.isThread?.() ? `#${channel.parent?.name ?? "?"} のスレッド「${channel.name}」` : `#${channel?.name ?? "?"}`;
-  const preferredName = nameMemory.getPreferredName(msg.author.id) ?? msg.member?.displayName ?? msg.author.username;
+  const channel = cache.channels.get(msg.channel_id);
+  const parent = channel?.parent_id ? cache.channels.get(channel.parent_id) : undefined;
+  const channelLabel = isThread(channel) ? `#${parent?.name ?? "?"} のスレッド「${channel?.name}」` : `#${channel?.name ?? "?"}`;
+  const preferredName = nameMemory.getPreferredName(msg.author.id) ?? authorName(msg);
   const notes = notesMemory.get(msg.author.id);
   const past = conversationMemory.getUserConversations(msg.author.id, 5);
 
@@ -106,7 +107,7 @@ function buildSystemPrompt(params: {
     "",
     "# 今の情報",
     `- 日本時間: ${getJapanTime()}（聞かれた時以外は言わない）`,
-    `- 場所: ${msg.guild?.name ?? "?"} の ${channelLabel}`,
+    `- 場所: ${cache.guilds.get(msg.guild_id ?? "")?.name ?? "?"} の ${channelLabel}`,
     `- 話し相手: ${preferredName}（名前は自然な場面でたまに使う程度）`,
     notes.length ? `- ${preferredName}について覚えていること: ${notes.join(" / ")}` : "",
     past.length
@@ -156,27 +157,42 @@ function postprocess(raw: string, emojis: Map<string, string>, isDev: boolean): 
 // エージェント本体
 // ──────────────────────────────────────────────────────────
 export async function generateReply(msg: Message, mode: ReplyMode): Promise<AgentReply> {
-  const guild = msg.guild!;
-  const member = msg.member ?? (await guild.members.fetch(msg.author.id));
-  const ctx: ToolContext = { msg, guild, member, media: new Map(), files: [], trace: [] };
-  const botId = msg.client.user!.id;
+  const guild = cache.guilds.get(msg.guild_id!)!;
+  const member = msg.member ?? (await cache.getMember(guild.id, msg.author.id)) ?? { roles: [] };
+  const ctx: ToolContext = {
+    msg,
+    guild,
+    member: { id: msg.author.id, displayName: authorName(msg), roles: member.roles ?? [] },
+    media: new Map(),
+    files: [],
+    trace: [],
+  };
+  const botId = cache.botId;
 
-  // 返信先メッセージ
+  // 返信先メッセージ（Gateway のメッセージには 1 段目が入っている）
   let referenced: Message | null = null;
-  if (msg.reference?.messageId) referenced = await msg.fetchReference().catch(() => null);
+  if (msg.message_reference?.message_id) {
+    referenced = msg.referenced_message ?? (await fetchMessage(msg.channel_id, msg.message_reference.message_id).catch(() => null));
+  }
   // 返信先がさらに返信なら、その元（例: 動画の投稿 → Botの返事 → 「再度確認して」）も見る
   let rootReferenced: Message | null = null;
-  if (referenced?.reference?.messageId && referenced.attachments.size === 0) {
-    rootReferenced = await referenced.fetchReference().catch(() => null);
+  if (referenced?.message_reference?.message_id && (referenced.attachments ?? []).length === 0) {
+    rootReferenced = await fetchMessage(
+      referenced.message_reference.channel_id ?? referenced.channel_id,
+      referenced.message_reference.message_id,
+    ).catch(() => null);
   }
+  if (referenced && !referenced.guild_id) referenced.guild_id = msg.guild_id;
+  if (rootReferenced && !rootReferenced.guild_id) rootReferenced.guild_id = msg.guild_id;
 
   const isDev = /\/dev\b/i.test(msg.content) || /\/dev\b/i.test(referenced?.content ?? "");
   const emojis = availableServerEmojis(guild);
 
   // 直近の流れ
-  const recent = Array.from((await msg.channel.messages.fetch({ limit: 16, before: msg.id }).catch(() => new Map())).values() as Iterable<Message>)
-    .sort((a, b) => a.createdTimestamp - b.createdTimestamp)
-    .filter((m) => Date.now() - m.createdTimestamp < 24 * 3600_000);
+  const recent = (await fetchMessages(msg.channel_id, { limit: 16, before: msg.id }).catch(() => [] as Message[]))
+    .map((m) => ({ ...m, guild_id: m.guild_id ?? msg.guild_id }))
+    .sort((a, b) => Date.parse(a.timestamp) - Date.parse(b.timestamp))
+    .filter((m) => Date.now() - Date.parse(m.timestamp) < 24 * 3600_000);
 
   const current = formatMessage(ctx, msg, botId);
 

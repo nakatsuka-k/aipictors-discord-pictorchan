@@ -1,22 +1,10 @@
-// src/index.ts
 //--------------------------------------------------------------------
-// Discord “ぴくたーちゃん” Bot 2.0（Fly.io）
+// Discord “ぴくたーちゃん” Bot 3.0（Cloudflare Workers + Durable Object）
 //   ✓ ツール呼び出し型の会話エージェント（他チャンネル参照・リンク/動画閲覧・検索）
 //   ✓ /checkimage /gacha /iken /huguai /diary ほか
 //   ✓ 新規メンバー歓迎・毎日の日記・アップデート告知
+// Gateway のイベントは src/gateway.ts から dispatch() に届く
 //--------------------------------------------------------------------
-import {
-  AttachmentBuilder,
-  Client,
-  GatewayIntentBits,
-  Partials,
-  REST,
-  Routes,
-  SlashCommandBuilder,
-  type ChatInputCommandInteraction,
-  type Message,
-} from "discord.js";
-import cron from "node-cron";
 import { fetchLinkedCard, notifyMemberJoined, toAchievementCardUrl } from "./aipictors-link";
 import { generateReply, type ReplyMode } from "./agent";
 import { CHANGELOG, CURRENT_VERSION, formatAnnouncement } from "./changelog";
@@ -24,8 +12,6 @@ import {
   ANNOUNCE_CHANNEL_ID,
   ANNOUNCE_STATE_PATH,
   CLIENT_ID,
-  DISCORD_TOKEN,
-  GROK_API_KEY,
   MAX_IMAGE_BYTES,
   NO_INTERACT_CHANNEL_IDS,
   PICTORCHAN_CHANNEL_ID,
@@ -33,30 +19,30 @@ import {
   VISION_MODEL,
 } from "./config";
 import { parseDiaryDateInput, postDiary } from "./diary";
-import { organizeAndPostFeedback, setFeedbackClient } from "./feedback";
+import {
+  authorName,
+  base64ToBytes,
+  cache,
+  discord,
+  isThread,
+  react,
+  replyTo,
+  sendMessage,
+  sendTyping,
+  userDisplayName,
+  type Attachment,
+  type Member,
+  type Message,
+  type SendOptions,
+  type User,
+} from "./discord";
+import { organizeAndPostFeedback } from "./feedback";
 import { imageUrlToDataUri } from "./media";
-import { conversationMemory, nameMemory, notesMemory, serverMessageLog } from "./store";
-import { flushAllPending, getJapanNow, japanDateKey, readJson, splitForDiscord, truncate, writeJsonAtomic } from "./util";
+import { conversationMemory, label, nameMemory, normalize, notesMemory, serverMessageLog } from "./store";
+import { userTag } from "./tools";
+import { getJapanNow, getJapanTimeFromTimestamp, japanDateKey, readJson, splitForDiscord, truncate, writeJsonAtomic } from "./util";
 import { welcomeMember } from "./welcome";
 import { visionText } from "./xai";
-
-if (!DISCORD_TOKEN || !GROK_API_KEY) {
-  console.error("[BOT] DISCORD_TOKEN と GROK_API_KEY は必須です。");
-  process.exit(1);
-}
-
-const client = new Client({
-  intents: [
-    GatewayIntentBits.Guilds,
-    GatewayIntentBits.GuildMessages,
-    GatewayIntentBits.MessageContent,
-    GatewayIntentBits.GuildMembers,
-    GatewayIntentBits.GuildEmojisAndStickers,
-  ],
-  partials: [Partials.Message],
-  allowedMentions: { parse: [], repliedUser: true },
-});
-setFeedbackClient(client);
 
 // ──────────────────────────────────────────────────────────
 // レート制限・同時実行
@@ -71,6 +57,8 @@ function allowRequest(userId: string): boolean {
   return true;
 }
 const busyAutoChannels = new Set<string>();
+// 再接続で同じイベントがもう一度届いても二重に返事しない
+const handledMessages = new Set<string>();
 
 function ndnDice(expr: string): string {
   const [nStr, dStr] = expr.toLowerCase().split("d");
@@ -81,158 +69,181 @@ function ndnDice(expr: string): string {
   return `🎲 [${expr}] → ${rolls.reduce((a, b) => a + b)}  ( ${rolls.join(",")} )`;
 }
 
+/** discord.js の mentions.repliedUser（返信先の投稿者） */
+const repliedUser = (msg: Message): User | undefined => msg.referenced_message?.author;
+
 function isAutoReplyCandidate(content: string, msg: Message): boolean {
   const text = (content ?? "").trim();
   // 他の人への返信・呼びかけには割り込まない
-  if (msg.reference?.messageId && msg.mentions.repliedUser && msg.mentions.repliedUser.id !== client.user!.id) return false;
+  const replied = repliedUser(msg);
+  if (msg.message_reference?.message_id && replied && replied.id !== cache.botId) return false;
   const addressed = text.match(/^([^\s、,。!！?？]{1,15}?)(さん|ちゃん|くん|君|氏|様)[、,!！\s]/);
   if (addressed && !/ぴくたー|ピクター|pictor/i.test(addressed[1])) return false;
-  if (msg.attachments.size > 0) return true;
+  if ((msg.attachments ?? []).length > 0) return true;
   if (text.length < 2) return false;
   if (/^<a?:\w+:\d+>$/.test(text)) return false;
   if (/^[\p{Extended_Pictographic}\s]+$/u.test(text)) return false;
   return true;
 }
 
+async function logServerMessage(msg: Message) {
+  const channel = await cache.getChannel(msg.channel_id);
+  const parent = isThread(channel) && channel?.parent_id ? await cache.getChannel(channel.parent_id) : null;
+  const attachments = msg.attachments ?? [];
+  const timestamp = Date.parse(msg.timestamp);
+  serverMessageLog.addMessage({
+    messageId: msg.id,
+    guildId: msg.guild_id ?? null,
+    channelId: msg.channel_id,
+    channelName: label(channel?.name ?? "unknown-channel"),
+    parentChannelId: parent?.id ?? null,
+    parentChannelName: parent?.name ? label(parent.name) : null,
+    timestamp,
+    timeString: getJapanTimeFromTimestamp(timestamp),
+    userId: msg.author.id,
+    userName: label(authorName(msg)),
+    content: normalize(msg.content),
+    attachmentNames: attachments.map((a) => a.filename ?? "attachment").slice(0, 6),
+    attachmentUrls: attachments.map((a) => a.url).filter(Boolean).slice(0, 6),
+    hasImage: attachments.some((a) => /^image\//.test(a.content_type ?? "") || /\.(png|jpe?g|gif|webp)$/i.test(a.filename ?? "")),
+    replyToMessageId: msg.message_reference?.message_id ?? null,
+  });
+}
+
 // ──────────────────────────────────────────────────────────
 // メッセージ
 // ──────────────────────────────────────────────────────────
-client.on("messageCreate", async (msg: Message) => {
-  if (msg.author.bot || !msg.guild) return;
+async function onMessageCreate(msg: Message) {
+  cache.noteMessage(msg);
+  if (msg.author.bot || !msg.guild_id) return;
+  if (handledMessages.has(msg.id)) return;
+  handledMessages.add(msg.id);
+  if (handledMessages.size > 2000) handledMessages.delete(handledMessages.values().next().value!);
 
-  serverMessageLog.addMessage(msg);
-  nameMemory.observe(msg.author.id, msg.member?.displayName ?? msg.author.displayName ?? msg.author.username, msg.content);
+  await logServerMessage(msg).catch((error) => console.error("[SERVER_LOG] error", error));
+  nameMemory.observe(msg.author.id, authorName(msg), msg.content);
 
-  if (NO_INTERACT_CHANNEL_IDS.has(msg.channel.id)) return;
+  if (NO_INTERACT_CHANNEL_IDS.has(msg.channel_id)) return;
 
-  const botId = client.user!.id;
+  const botId = cache.botId;
+  const mentionedUsers = msg.mentions ?? [];
   const isMentioned =
-    msg.mentions.users.has(botId) ||
-    msg.mentions.repliedUser?.id === botId ||
+    mentionedUsers.some((u) => u.id === botId) ||
+    repliedUser(msg)?.id === botId ||
     new RegExp(`<@!?${botId}>|@ぴくたーちゃん|@pictorchan`, "i").test(msg.content);
 
   // 他人宛てのメンションだけなら反応しない
-  if (!isMentioned && msg.mentions.users.size > 0) return;
+  if (!isMentioned && mentionedUsers.length > 0) return;
 
   if (/^\d+d\d+$/i.test(msg.content.trim())) {
-    await msg.reply(ndnDice(msg.content.trim())).catch(() => {});
+    await replyTo(msg, ndnDice(msg.content.trim())).catch(() => {});
     return;
   }
 
-  const isAutoChannel = msg.channel.id === PICTORCHAN_CHANNEL_ID;
+  const isAutoChannel = msg.channel_id === PICTORCHAN_CHANNEL_ID;
   const mode: ReplyMode | null = isMentioned ? "mention" : isAutoChannel && isAutoReplyCandidate(msg.content, msg) ? "auto" : null;
   if (!mode) return;
 
   if (/^(<@!?\d+>\s*)?(にゃん|にゃーん|にゃ～ん)[!！。]*$/.test(msg.content.trim())) {
-    await msg.reply("にゃ～ん🐱").catch(() => {});
+    await replyTo(msg, "にゃ～ん🐱").catch(() => {});
     return;
   }
 
   if (!allowRequest(msg.author.id)) {
-    if (mode === "mention") await msg.react("⏳").catch(() => {});
+    if (mode === "mention") await react(msg, "⏳").catch(() => {});
     return;
   }
   if (mode === "auto") {
-    if (busyAutoChannels.has(msg.channel.id)) return;
-    busyAutoChannels.add(msg.channel.id);
+    if (busyAutoChannels.has(msg.channel_id)) return;
+    busyAutoChannels.add(msg.channel_id);
   }
 
-  const channel: any = msg.channel;
-  channel.sendTyping?.().catch(() => {});
-  const typing = setInterval(() => channel.sendTyping?.().catch(() => {}), 8_000);
+  sendTyping(msg.channel_id).catch(() => {});
+  const typing = setInterval(() => sendTyping(msg.channel_id).catch(() => {}), 8_000);
   const startedAt = Date.now();
+  const channelName = cache.channels.get(msg.channel_id)?.name ?? msg.channel_id;
 
   try {
     const reply = await generateReply(msg, mode);
     console.log(
-      `[REPLY] ${mode} ch=${channel.name} user=${msg.author.id} ${Date.now() - startedAt}ms $${reply.costUsd.toFixed(4)} in=${reply.usage.input} cached=${reply.usage.cached} out=${reply.usage.output} tools=[${reply.trace.join(", ")}] skip=${reply.text === null}`,
+      `[REPLY] ${mode} ch=${channelName} user=${msg.author.id} ${Date.now() - startedAt}ms $${reply.costUsd.toFixed(4)} in=${reply.usage.input} cached=${reply.usage.cached} out=${reply.usage.output} tools=[${reply.trace.join(", ")}] skip=${reply.text === null}`,
     );
     if (reply.text === null) return;
 
     const chunks = splitForDiscord(reply.text, 1900);
     const files = reply.files.length ? reply.files : undefined;
-    const stillLatest = channel.lastMessageId === msg.id;
+    const stillLatest = cache.channels.get(msg.channel_id)?.last_message_id === msg.id;
     if (mode === "auto" && stillLatest && !files) {
-      await channel.send({ content: chunks[0] });
+      await sendMessage(msg.channel_id, { content: chunks[0] });
     } else {
-      await msg.reply({ content: chunks[0], files });
+      await replyTo(msg, { content: chunks[0], files });
     }
-    for (const chunk of chunks.slice(1)) await channel.send({ content: chunk });
+    for (const chunk of chunks.slice(1)) await sendMessage(msg.channel_id, { content: chunk });
 
     const userText = msg.content.replace(new RegExp(`<@!?${botId}>`, "g"), "").trim() || "(添付のみ)";
-    conversationMemory.addConversation(
-      msg.author.id,
-      msg.channel.id,
-      msg.member?.displayName ?? msg.author.username,
-      truncate(userText, 500),
-      truncate(reply.text, 500),
-    );
+    conversationMemory.addConversation(msg.author.id, msg.channel_id, authorName(msg), truncate(userText, 500), truncate(reply.text, 500));
   } catch (error) {
     console.error("[REPLY] error", error);
-    if (mode === "mention") await msg.reply("ごめんね、ちょっと調子が悪いみたい🥺 少ししてからもう一回話しかけてね").catch(() => {});
+    if (mode === "mention") await replyTo(msg, "ごめんね、ちょっと調子が悪いみたい🥺 少ししてからもう一回話しかけてね").catch(() => {});
   } finally {
     clearInterval(typing);
-    busyAutoChannels.delete(msg.channel.id);
+    busyAutoChannels.delete(msg.channel_id);
   }
-});
-
-client.on("messageUpdate", async (_old, updated) => {
-  if (updated.partial || !updated.author || updated.author.bot) return;
-  serverMessageLog.updateMessage(updated.id, updated.content ?? "");
-});
-
-client.on("messageDelete", async (msg) => {
-  serverMessageLog.markDeleted(msg.id);
-});
-
-client.on("guildMemberAdd", (member) => {
-  welcomeMember(client, member).catch(() => {});
-  // Aipictors と連携済みの人には、参加したらすぐバッジとレベルを付ける
-  notifyMemberJoined(member.id).catch(() => {});
-});
+}
 
 // ──────────────────────────────────────────────────────────
 // スラッシュコマンド
 // ──────────────────────────────────────────────────────────
-const commands = [
-  new SlashCommandBuilder().setName("help").setDescription("ぴくたーちゃんにできることを表示します"),
-  new SlashCommandBuilder()
-    .setName("checkimage")
-    .setDescription("画像の破綻箇所を指摘します")
-    .addAttachmentOption((o) => o.setName("image").setDescription("チェックする画像").setRequired(true)),
-  new SlashCommandBuilder().setName("gacha").setDescription("ガチャを引くよ～"),
-  new SlashCommandBuilder()
-    .setName("iken")
-    .setDescription("Aipictorsへの意見を投稿します")
-    .addStringOption((o) => o.setName("content").setDescription("意見の内容").setRequired(true)),
-  new SlashCommandBuilder()
-    .setName("huguai")
-    .setDescription("Aipictorsの不具合を報告します")
-    .addStringOption((o) => o.setName("content").setDescription("不具合の内容").setRequired(true)),
-  new SlashCommandBuilder().setName("forget").setDescription("あなたとの会話履歴と覚え書きを消去します"),
-  new SlashCommandBuilder().setName("forget_channel").setDescription("このチャンネルの会話履歴を消去します"),
-  new SlashCommandBuilder()
-    .setName("myname")
-    .setDescription("ぴくたーちゃんに呼んでほしい名前を教えます")
-    .addStringOption((o) => o.setName("name").setDescription("呼び名（20文字以内）").setRequired(true)),
-  new SlashCommandBuilder().setName("forget_name").setDescription("あなたの呼び名を忘れます"),
-  new SlashCommandBuilder().setName("namelist").setDescription("覚えている人の一覧を表示します"),
-  new SlashCommandBuilder()
-    .setName("card")
-    .setDescription("Aipictors の実績カードを見せます（Discord 連携している人だけ）")
-    .addUserOption((o) => o.setName("user").setDescription("カードを見たい人（省略すると自分）")),
-  new SlashCommandBuilder()
-    .setName("diary")
-    .setDescription("指定日のぴくたーちゃん日記を投稿します")
-    .addStringOption((o) => o.setName("date").setDescription("対象日。例: 2026-03-28 または 03.28").setRequired(true)),
+const STRING = 3;
+const USER = 6;
+const ATTACHMENT = 11;
+const COMMANDS = [
+  { name: "help", description: "ぴくたーちゃんにできることを表示します" },
+  {
+    name: "checkimage",
+    description: "画像の破綻箇所を指摘します",
+    options: [{ type: ATTACHMENT, name: "image", description: "チェックする画像", required: true }],
+  },
+  { name: "gacha", description: "ガチャを引くよ～" },
+  {
+    name: "iken",
+    description: "Aipictorsへの意見を投稿します",
+    options: [{ type: STRING, name: "content", description: "意見の内容", required: true }],
+  },
+  {
+    name: "huguai",
+    description: "Aipictorsの不具合を報告します",
+    options: [{ type: STRING, name: "content", description: "不具合の内容", required: true }],
+  },
+  { name: "forget", description: "あなたとの会話履歴と覚え書きを消去します" },
+  { name: "forget_channel", description: "このチャンネルの会話履歴を消去します" },
+  {
+    name: "myname",
+    description: "ぴくたーちゃんに呼んでほしい名前を教えます",
+    options: [{ type: STRING, name: "name", description: "呼び名（20文字以内）", required: true }],
+  },
+  { name: "forget_name", description: "あなたの呼び名を忘れます" },
+  { name: "namelist", description: "覚えている人の一覧を表示します" },
+  {
+    name: "card",
+    description: "Aipictors の実績カードを見せます（Discord 連携している人だけ）",
+    options: [{ type: USER, name: "user", description: "カードを見たい人（省略すると自分）" }],
+  },
+  {
+    name: "diary",
+    description: "指定日のぴくたーちゃん日記を投稿します",
+    options: [{ type: STRING, name: "date", description: "対象日。例: 2026-03-28 または 03.28", required: true }],
+  },
 ];
 
-async function registerCommands() {
+/** 内容が変わったときだけ登録し直す（Durable Object は再起動が多く、登録には 1 日の回数制限がある） */
+export async function registerCommands(storage: { get<T>(key: string): Promise<T | undefined>; put(key: string, value: unknown): Promise<void> }) {
   if (!CLIENT_ID) return console.warn("[BOT] CLIENT_ID が無いので SlashCommand は登録しません");
+  const signature = JSON.stringify(COMMANDS);
+  if ((await storage.get<string>("commandsSignature")) === signature) return;
   try {
-    await new REST({ version: "10" }).setToken(DISCORD_TOKEN!).put(Routes.applicationCommands(CLIENT_ID), {
-      body: commands.map((c) => c.toJSON()),
-    });
+    await discord("PUT", `/applications/${CLIENT_ID}/commands`, COMMANDS);
+    await storage.put("commandsSignature", signature);
     console.log("✅ SlashCommands registered");
   } catch (error) {
     console.error("[BOT] SlashCommand 登録失敗", error);
@@ -251,8 +262,75 @@ const HELP_TEXT = [
   `-# v${CURRENT_VERSION}`,
 ].join("\n");
 
-async function handleCard(interaction: ChatInputCommandInteraction) {
-  const target = interaction.options.getUser("user") ?? interaction.user;
+/** discord.js の ChatInputCommandInteraction の代わり（使う分だけ） */
+class Interaction {
+  deferred = false;
+  replied = false;
+  readonly user: User;
+  readonly commandName: string;
+  readonly channelId: string;
+
+  constructor(private raw: any) {
+    this.user = raw.member?.user ?? raw.user;
+    this.commandName = raw.data?.name;
+    this.channelId = raw.channel_id;
+  }
+
+  private option(name: string) {
+    return (this.raw.data?.options ?? []).find((o: any) => o.name === name)?.value;
+  }
+
+  getString(name: string): string {
+    return String(this.option(name) ?? "");
+  }
+
+  getUser(name: string): { user: User; member?: Member } | null {
+    const id = this.option(name);
+    if (!id) return null;
+    const user = this.raw.data?.resolved?.users?.[id];
+    return user ? { user, member: this.raw.data?.resolved?.members?.[id] } : null;
+  }
+
+  getAttachment(name: string): Attachment | null {
+    const id = this.option(name);
+    return id ? (this.raw.data?.resolved?.attachments?.[id] ?? null) : null;
+  }
+
+  private body(options: SendOptions) {
+    const o = typeof options === "string" ? { content: options } : options;
+    return {
+      body: { content: o.content, embeds: o.embeds, allowed_mentions: o.allowedMentions ?? { parse: [] }, flags: o.ephemeral ? 64 : undefined },
+      files: o.files,
+    };
+  }
+
+  async reply(options: SendOptions) {
+    const { body, files } = this.body(options);
+    await discord("POST", `/interactions/${this.raw.id}/${this.raw.token}/callback`, { type: 4, data: body }, files, false);
+    this.replied = true;
+  }
+
+  async deferReply() {
+    await discord("POST", `/interactions/${this.raw.id}/${this.raw.token}/callback`, { type: 5 }, undefined, false);
+    this.deferred = true;
+  }
+
+  async editReply(options: SendOptions) {
+    const { body, files } = this.body(options);
+    await discord("PATCH", `/webhooks/${this.raw.application_id}/${this.raw.token}/messages/@original`, body, files, false);
+    this.replied = true;
+  }
+
+  async followUp(options: SendOptions) {
+    const { body, files } = this.body(options);
+    await discord("POST", `/webhooks/${this.raw.application_id}/${this.raw.token}`, body, files, false);
+  }
+}
+
+async function handleCard(interaction: Interaction) {
+  const option = interaction.getUser("user");
+  const target = option?.user ?? interaction.user;
+  const targetName = userDisplayName(target, option?.member?.nick);
   await interaction.deferReply();
   const card = await fetchLinkedCard(target.id);
   if (!card || !card.isLinked) {
@@ -260,7 +338,7 @@ async function handleCard(interaction: ChatInputCommandInteraction) {
       content:
         target.id === interaction.user.id
           ? "まだ Aipictors と連携してないみたい🥔 連携すると名前の横にバッジが付くよ！\nhttps://www.aipictors.com/settings/discord"
-          : `${target.displayName} さんはまだ Aipictors と連携してないみたい🥔`,
+          : `${targetName} さんはまだ Aipictors と連携してないみたい🥔`,
       allowedMentions: { parse: [] },
     });
     return;
@@ -269,7 +347,7 @@ async function handleCard(interaction: ChatInputCommandInteraction) {
     await interaction.editReply("この人は実績を非公開にしているよ🤫");
     return;
   }
-  const name = card.name ?? target.displayName;
+  const name = card.name ?? targetName;
   await interaction.editReply({
     allowedMentions: { parse: [] },
     embeds: [
@@ -284,8 +362,12 @@ async function handleCard(interaction: ChatInputCommandInteraction) {
   });
 }
 
-async function handleCheckImage(interaction: ChatInputCommandInteraction) {
-  const image = interaction.options.getAttachment("image", true);
+async function handleCheckImage(interaction: Interaction) {
+  const image = interaction.getAttachment("image");
+  if (!image) {
+    await interaction.reply("画像を添付してね🙏");
+    return;
+  }
   if (image.size > MAX_IMAGE_BYTES) {
     await interaction.reply(`画像は ${MAX_IMAGE_BYTES / 1024 / 1024}MB 以下にしてね🙏`);
     return;
@@ -306,9 +388,10 @@ async function handleCheckImage(interaction: ChatInputCommandInteraction) {
       { model: VISION_MODEL, maxOutputTokens: 1500 },
     )) ?? "解析できなかったみたい…🥺";
   const [first, ...rest] = splitForDiscord(`**チェック結果**\n${text}`, 1900);
+  const mime = dataUri.slice(5, dataUri.indexOf(";"));
   await interaction.editReply({
     content: first,
-    files: [new AttachmentBuilder(Buffer.from(dataUri.split(",")[1], "base64"), { name: "image.jpg" })],
+    files: [{ name: mime === "image/png" ? "image.png" : "image.jpg", data: base64ToBytes(dataUri.split(",")[1]) }],
   });
   for (const chunk of rest) await interaction.followUp(chunk);
 }
@@ -332,8 +415,9 @@ function handleGacha(): string {
   return `${items[items.length - 1]} が当選しました！`;
 }
 
-client.on("interactionCreate", async (interaction) => {
-  if (!interaction.isChatInputCommand()) return;
+async function onInteractionCreate(raw: any) {
+  if (raw.type !== 2 || raw.data?.type !== 1) return; // チャット入力のスラッシュコマンドだけ
+  const interaction = new Interaction(raw);
   try {
     switch (interaction.commandName) {
       case "help":
@@ -350,8 +434,8 @@ client.on("interactionCreate", async (interaction) => {
         await interaction.deferReply();
         const kind = interaction.commandName === "iken" ? "opinion" : "bug";
         const result = await organizeAndPostFeedback(
-          interaction.options.getString("content", true),
-          `${interaction.user.tag} (${interaction.user.id})`,
+          interaction.getString("content"),
+          `${userTag(interaction.user)} (${interaction.user.id})`,
           kind,
         );
         await interaction.editReply(result.posted ? `${result.message} ありがとう🙏✨` : "ごめんね、投稿に失敗しちゃった🥺");
@@ -367,12 +451,12 @@ client.on("interactionCreate", async (interaction) => {
         await interaction.reply("このチャンネルの会話履歴を消したよ🧹");
         break;
       case "myname": {
-        const name = interaction.options.getString("name", true);
+        const name = interaction.getString("name");
         if (name.length > 20) {
           await interaction.reply({ content: "名前は20文字以内にしてね🙏", ephemeral: true });
           break;
         }
-        nameMemory.setPreferredName(interaction.user.id, interaction.user.displayName ?? interaction.user.username, name);
+        nameMemory.setPreferredName(interaction.user.id, userDisplayName(interaction.user), name);
         await interaction.reply(`${name}さんだね、覚えたよ♪✨`);
         break;
       }
@@ -387,7 +471,7 @@ client.on("interactionCreate", async (interaction) => {
         await handleCard(interaction);
         break;
       case "diary": {
-        const targetDate = parseDiaryDateInput(interaction.options.getString("date", true));
+        const targetDate = parseDiaryDateInput(interaction.getString("date"));
         if (!targetDate) {
           await interaction.reply("日付の形式が違うみたい。例: 2026-03-28 または 03.28");
           break;
@@ -397,7 +481,7 @@ client.on("interactionCreate", async (interaction) => {
           break;
         }
         await interaction.deferReply();
-        const result = await postDiary(client, { targetDate, skipStateCheck: true, updateState: false });
+        const result = await postDiary({ targetDate, skipStateCheck: true, updateState: false });
         await interaction.editReply(result.posted ? `${result.title} を投稿したよ📝` : `${result.title} の投稿に失敗したよ。ログを確認してね`);
         break;
       }
@@ -408,20 +492,18 @@ client.on("interactionCreate", async (interaction) => {
     if (interaction.deferred || interaction.replied) await interaction.editReply(content).catch(() => {});
     else await interaction.reply({ content, ephemeral: true }).catch(() => {});
   }
-});
+}
 
 // ──────────────────────────────────────────────────────────
 // アップデート告知（新バージョンで一度だけ）
 // ──────────────────────────────────────────────────────────
-async function announceUpdateIfNeeded() {
+export async function announceUpdateIfNeeded() {
   const state = readJson<{ lastAnnouncedVersion?: string; channels?: Record<string, string> }>(ANNOUNCE_STATE_PATH, {});
   if (state.lastAnnouncedVersion === CURRENT_VERSION) return;
 
   const content = formatAnnouncement(CHANGELOG[0]);
   const posted: Record<string, string> = {};
-  const targetChannelIds = CHANGELOG[0].pictorchanOnly
-    ? [PICTORCHAN_CHANNEL_ID]
-    : [PICTORCHAN_CHANNEL_ID, ANNOUNCE_CHANNEL_ID];
+  const targetChannelIds = CHANGELOG[0].pictorchanOnly ? [PICTORCHAN_CHANNEL_ID] : [PICTORCHAN_CHANNEL_ID, ANNOUNCE_CHANNEL_ID];
   for (const channelId of targetChannelIds) {
     // 再起動時に片方だけ投稿済みなら二重投稿しない
     if (state.channels?.[channelId] === CURRENT_VERSION) {
@@ -429,8 +511,7 @@ async function announceUpdateIfNeeded() {
       continue;
     }
     try {
-      const channel: any = await client.channels.fetch(channelId);
-      await channel.send({ content, allowedMentions: { parse: [] } });
+      await sendMessage(channelId, { content, allowedMentions: { parse: [] } });
       posted[channelId] = CURRENT_VERSION;
       console.log(`[ANNOUNCE] v${CURRENT_VERSION} posted to ${channelId}`);
     } catch (error) {
@@ -444,32 +525,63 @@ async function announceUpdateIfNeeded() {
   });
 }
 
-// ──────────────────────────────────────────────────────────
-// 起動
-// ──────────────────────────────────────────────────────────
-client.once("clientReady", async () => {
-  console.log(`[BOT] Logged in as ${client.user?.tag} (v${CURRENT_VERSION})`);
-  await registerCommands();
-  for (const guild of client.guilds.cache.values()) await guild.emojis.fetch().catch(() => {});
-
-  // 毎日00:00(JST)に前日の日記。取りこぼし防止で15分ごとにも確認
-  cron.schedule("0 0 * * *", () => postDiary(client).catch(() => {}), { timezone: "Asia/Tokyo" });
-  cron.schedule("*/15 * * * *", () => postDiary(client).catch(() => {}), { timezone: "Asia/Tokyo" });
-  postDiary(client).catch(() => {});
-
-  announceUpdateIfNeeded().catch((error) => console.error("[ANNOUNCE] error", error));
-});
-
-function shutdown(signal: string) {
-  console.log(`[BOT] ${signal} received, flushing data...`);
-  flushAllPending();
-  client.destroy().finally(() => process.exit(0));
+/** 毎日 00:00(JST) に前日の日記。取りこぼし防止で 15 分ごとにも確認（毎分の cron から呼ぶ） */
+export async function runSchedules(now = new Date()) {
+  if (now.getUTCMinutes() % 15 === 0) await postDiary().catch(() => {});
 }
-process.on("SIGINT", () => shutdown("SIGINT"));
-process.on("SIGTERM", () => shutdown("SIGTERM"));
-process.on("unhandledRejection", (error) => console.error("[BOT] unhandledRejection", error));
 
-client.login(DISCORD_TOKEN).catch((error) => {
-  console.error("[LOGIN ERROR]", error);
-  process.exit(1);
-});
+// ──────────────────────────────────────────────────────────
+// Gateway のイベント
+// ──────────────────────────────────────────────────────────
+export function dispatch(type: string, d: any): Promise<unknown> | void {
+  switch (type) {
+    case "READY":
+      cache.botId = d.user.id;
+      cache.botUser = d.user;
+      return;
+    case "GUILD_CREATE":
+      cache.guildCreate(d);
+      // 自分のロール（権限の計算に使う）が無ければ取りに行く
+      if (cache.botId && !cache.guilds.get(d.id)?.members.has(cache.botId)) return cache.getMember(d.id, cache.botId);
+      return;
+    case "GUILD_UPDATE":
+      return cache.guildUpdate(d);
+    case "GUILD_ROLE_CREATE":
+    case "GUILD_ROLE_UPDATE":
+      return cache.roleUpsert(d.guild_id, d.role);
+    case "GUILD_ROLE_DELETE":
+      return cache.roleDelete(d.guild_id, d.role_id);
+    case "GUILD_EMOJIS_UPDATE":
+      return cache.emojisUpdate(d.guild_id, d.emojis);
+    case "CHANNEL_CREATE":
+    case "CHANNEL_UPDATE":
+    case "THREAD_CREATE":
+    case "THREAD_UPDATE":
+      return cache.channelUpsert(d);
+    case "CHANNEL_DELETE":
+    case "THREAD_DELETE":
+      return cache.channelDelete(d.id);
+    case "THREAD_LIST_SYNC":
+      for (const thread of d.threads ?? []) cache.channelUpsert({ ...thread, guild_id: d.guild_id });
+      return;
+    case "GUILD_MEMBER_UPDATE":
+      return cache.memberUpsert(d.guild_id, d.user.id, d);
+    case "GUILD_MEMBER_REMOVE":
+      return cache.memberRemove(d.guild_id, d.user.id);
+    case "GUILD_MEMBER_ADD":
+      cache.memberUpsert(d.guild_id, d.user.id, d);
+      welcomeMember(d).catch(() => {});
+      // Aipictors と連携済みの人には、参加したらすぐバッジとレベルを付ける
+      notifyMemberJoined(d.user.id).catch(() => {});
+      return;
+    case "MESSAGE_CREATE":
+      return onMessageCreate(d).catch((error) => console.error("[MESSAGE] error", error));
+    case "MESSAGE_UPDATE":
+      if (!d.author || d.author.bot || typeof d.content !== "string") return;
+      return serverMessageLog.updateMessage(d.id, d.content);
+    case "MESSAGE_DELETE":
+      return serverMessageLog.markDeleted(d.id);
+    case "INTERACTION_CREATE":
+      return onInteractionCreate(d);
+  }
+}

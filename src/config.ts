@@ -1,5 +1,3 @@
-import "dotenv/config";
-
 export const {
   DISCORD_TOKEN,
   GROK_API_KEY,
@@ -55,9 +53,9 @@ export const NO_INTERACT_CHANNEL_IDS = new Set<string>([
 ]);
 
 // ──────────────────────────────────────────────────────────
-// 永続化
+// 永続化（R2 pictorchan-state のファイル名。src/state.ts）
 // ──────────────────────────────────────────────────────────
-export const DATA_DIR = process.env.DATA_DIR ?? "/data";
+export const DATA_DIR = "/data";
 export const MEMORY_FILE_PATH = `${DATA_DIR}/user_memories.json`;
 export const CHANNEL_MEMORY_FILE_PATH = `${DATA_DIR}/channel_memories.json`;
 export const NAMES_FILE_PATH = `${DATA_DIR}/user_names.json`;
@@ -75,7 +73,8 @@ export const MAX_SERVER_MESSAGE_LOG_LENGTH = 50000;
 // コスト・負荷の上限
 // ──────────────────────────────────────────────────────────
 export const MAX_IMAGE_BYTES = 10 * 1024 * 1024;
-export const MAX_VIDEO_BYTES = 200 * 1024 * 1024;
+// Cloudflare Media Transformations の入力は 100MB まで
+export const MAX_VIDEO_BYTES = 100 * 1024 * 1024;
 export const MAX_AGENT_ROUNDS = 5;
 export const USER_REQUESTS_PER_MINUTE = 6;
 // grok-imagine-image は 1 枚 $0.02。全員が上限まで使っても 1 日 $1.2 ほど

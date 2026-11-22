@@ -1,4 +1,3 @@
-import * as cheerio from "cheerio";
 import { digestVideo, formatSeconds, imageUrlToDataUri, readLimited, safeFetch } from "./media";
 import { videoImages, type MediaImage } from "./tools";
 import { truncate } from "./util";
@@ -194,22 +193,7 @@ async function readGeneric(url: string, options: { withMedia?: boolean }): Promi
   const raw = (await readLimited(res, 3 * 1024 * 1024)).toString("utf8");
   if (/json/.test(contentType)) return { text: truncate(raw, 4000), images: [], mediaUrls: [] };
 
-  const $ = cheerio.load(raw);
-  const meta = (name: string) =>
-    $(`meta[property="${name}"]`).attr("content") ?? $(`meta[name="${name}"]`).attr("content") ?? "";
-  const title = meta("og:title") || $("title").first().text().trim();
-  const description = meta("og:description") || meta("description");
-  const ogImage = meta("og:image");
-  const siteName = meta("og:site_name");
-
-  $("script, style, noscript, svg, nav, footer, header, aside, form, iframe").remove();
-  const root = $("article").first().length ? $("article").first() : $("main").first().length ? $("main").first() : $("body");
-  const body = root
-    .text()
-    .split("\n")
-    .map((l) => l.replace(/\s+/g, " ").trim())
-    .filter((l) => l.length > 1)
-    .join("\n");
+  const { title, description, ogImage, siteName, body } = await extractPage(raw);
 
   const lines = [
     `[Webページ] ${url}`,
@@ -231,4 +215,110 @@ async function readGeneric(url: string, options: { withMedia?: boolean }): Promi
     }
   }
   return { text: lines.join("\n"), images, mediaUrls };
+}
+
+// ──────────────────────────────────────────────────────────
+// HTML から題名・説明・本文を取り出す（HTMLRewriter）
+// ──────────────────────────────────────────────────────────
+const SKIP_TAGS = "script, style, noscript, svg, nav, footer, header, aside, form, iframe";
+const BLOCK_TAGS = "p, div, li, br, tr, h1, h2, h3, h4, h5, h6, section, blockquote, pre, dd, dt";
+
+function decodeEntities(text: string): string {
+  const named: Record<string, string> = { amp: "&", lt: "<", gt: ">", quot: '"', apos: "'", nbsp: " ", "#39": "'" };
+  return text.replace(/&(#x[0-9a-f]+|#\d+|[a-z]+|#39);/gi, (whole, code: string) => {
+    if (code[0] === "#") {
+      const n = code[1] === "x" || code[1] === "X" ? parseInt(code.slice(2), 16) : parseInt(code.slice(1), 10);
+      return Number.isFinite(n) && n > 0 && n <= 0x10ffff ? String.fromCodePoint(n) : whole;
+    }
+    return named[code.toLowerCase()] ?? whole;
+  });
+}
+
+async function extractPage(raw: string) {
+  const meta: Record<string, string> = {};
+  let titleText = "";
+  let skip = 0;
+  let inTitle = false;
+  const depth = { article: 0, main: 0, body: 0 };
+  const text = { article: "", main: "", body: "" };
+  const seen = { article: false, main: false };
+
+  const rewriter = new HTMLRewriter()
+    .on("meta", {
+      element(e) {
+        const key = e.getAttribute("property") ?? e.getAttribute("name");
+        const content = e.getAttribute("content");
+        if (key && content && !(key in meta)) meta[key] = decodeEntities(content);
+      },
+    })
+    .on("title", {
+      element(e) {
+        if (titleText) return;
+        inTitle = true;
+        e.onEndTag(() => {
+          inTitle = false;
+        });
+      },
+    })
+    .on(SKIP_TAGS, {
+      element(e) {
+        skip++;
+        try {
+          e.onEndTag(() => {
+            skip--;
+          });
+        } catch {
+          skip--; // <svg/> のように閉じタグが無い
+        }
+      },
+    })
+    .on(BLOCK_TAGS, {
+      element(e) {
+        const newline = () => {
+          for (const key of ["article", "main", "body"] as const) if (depth[key] > 0) text[key] += "\n";
+        };
+        // <br> のように閉じタグが無い要素に onEndTag を付けると例外になる
+        if (e.tagName === "br") return newline();
+        try {
+          e.onEndTag(newline);
+        } catch {
+          newline();
+        }
+      },
+    });
+  for (const key of ["article", "main", "body"] as const) {
+    rewriter.on(key, {
+      element(e) {
+        // 最初の article / main だけ使う（cheerio の .first() と同じ）
+        if (key !== "body" && seen[key]) return;
+        if (key !== "body") seen[key] = true;
+        depth[key]++;
+        e.onEndTag(() => {
+          depth[key]--;
+        });
+      },
+    });
+  }
+  rewriter.onDocument({
+    text(chunk) {
+      if (inTitle) titleText += chunk.text;
+      if (skip > 0) return;
+      for (const key of ["article", "main", "body"] as const) if (depth[key] > 0) text[key] += chunk.text;
+    },
+  });
+  await rewriter.transform(new Response(raw, { headers: { "content-type": "text/html; charset=utf-8" } })).arrayBuffer();
+
+  const chosen = text.article.trim() ? text.article : text.main.trim() ? text.main : text.body;
+  const body = decodeEntities(chosen)
+    .split("\n")
+    .map((l) => l.replace(/\s+/g, " ").trim())
+    .filter((l) => l.length > 1)
+    .join("\n");
+  return {
+    title: meta["og:title"] || decodeEntities(titleText).trim(),
+    description: meta["og:description"] || meta["description"] || "",
+    ogImage: meta["og:image"] || "",
+    siteName: meta["og:site_name"] || "",
+    body,
+  };
 }

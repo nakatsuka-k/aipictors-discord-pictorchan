@@ -1,4 +1,4 @@
-import type { Client } from "discord.js";
+import { sendMessage } from "./discord";
 import { DIARY_CHANNEL_ID, DIARY_STATE_PATH } from "./config";
 import { conversationMemory, serverMessageLog, type ObservedServerMessage } from "./store";
 import { getJapanNow, japanDateKey, japanDateTitle, readJson, sampleEvenly, splitForDiscord, writeJsonAtomic } from "./util";
@@ -26,7 +26,6 @@ export function parseDiaryDateInput(input: string): Date | null {
 }
 
 export async function postDiary(
-  client: Client,
   options: { targetDate?: Date; skipStateCheck?: boolean; updateState?: boolean } = {},
 ): Promise<{ posted: boolean; dateKey: string; title: string }> {
   const targetDate = options.targetDate ? new Date(options.targetDate) : getJapanNow();
@@ -38,9 +37,6 @@ export async function postDiary(
   if (!options.skipStateCheck && state.lastPostedDate === dateKey) return { posted: false, dateKey, title };
 
   try {
-    const channel: any = await client.channels.fetch(DIARY_CHANNEL_ID);
-    if (!channel?.send) return { posted: false, dateKey, title };
-
     const observed = serverMessageLog.getMessagesByDate(dateKey);
     const conversations = conversationMemory
       .getAllChannelConversations()
@@ -74,7 +70,7 @@ export async function postDiary(
     }
 
     const segments = splitForDiscord(`**${title}**\n\n${body}`, 1900);
-    for (const segment of segments) await channel.send(segment);
+    for (const segment of segments) await sendMessage(DIARY_CHANNEL_ID, segment);
 
     if (options.updateState !== false) writeJsonAtomic(DIARY_STATE_PATH, { lastPostedDate: dateKey });
     console.log(`[DIARY] posted dateKey=${dateKey}`);

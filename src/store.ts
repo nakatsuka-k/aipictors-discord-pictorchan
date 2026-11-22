@@ -1,4 +1,3 @@
-import type { Message } from "discord.js";
 import {
   CHANNEL_MEMORY_FILE_PATH,
   MAX_CHANNEL_MEMORY_LENGTH,
@@ -244,28 +243,8 @@ class ServerMessageLog {
     this.messages.forEach((m, i) => this.indexById.set(m.messageId, i));
   }
 
-  addMessage(msg: Message) {
-    const channel = msg.channel as any;
-    const parent = typeof channel?.isThread === "function" && channel.isThread() ? channel.parent : null;
-    const attachments = Array.from(msg.attachments.values());
-    const record: ObservedServerMessage = {
-      messageId: msg.id,
-      guildId: msg.guildId ?? null,
-      channelId: msg.channel.id,
-      channelName: label(channel?.name ?? "unknown-channel"),
-      parentChannelId: parent?.id ?? null,
-      parentChannelName: parent?.name ? label(parent.name) : null,
-      timestamp: msg.createdTimestamp,
-      timeString: getJapanTimeFromTimestamp(msg.createdTimestamp),
-      userId: msg.author.id,
-      userName: label(msg.member?.displayName ?? msg.author.displayName ?? msg.author.username),
-      content: normalize(msg.content),
-      attachmentNames: attachments.map((a) => a.name ?? "attachment").slice(0, 6),
-      attachmentUrls: attachments.map((a) => a.url).filter(Boolean).slice(0, 6),
-      hasImage: attachments.some((a) => /^image\//.test(a.contentType ?? "") || /\.(png|jpe?g|gif|webp)$/i.test(a.name ?? "")),
-      replyToMessageId: msg.reference?.messageId ?? null,
-    };
-
+  addMessage(record: ObservedServerMessage) {
+    const msg = { id: record.messageId };
     const existing = this.indexById.get(msg.id);
     if (existing !== undefined) {
       this.messages[existing] = record;
@@ -309,11 +288,11 @@ class ServerMessageLog {
   }
 }
 
-function normalize(content: string): string {
+export function normalize(content: string): string {
   return (content ?? "").replace(/\s+/g, " ").trim().slice(0, 1000);
 }
 
-function label(value: string): string {
+export function label(value: string): string {
   return (value ?? "").replace(/\s+/g, " ").trim().slice(0, 80);
 }
 
@@ -343,8 +322,17 @@ class UsageCounter {
   }
 }
 
-export const nameMemory = new NameMemory();
-export const notesMemory = new NotesMemory();
-export const conversationMemory = new ConversationMemory();
-export const serverMessageLog = new ServerMessageLog();
-export const usageCounter = new UsageCounter();
+export let nameMemory: NameMemory;
+export let notesMemory: NotesMemory;
+export let conversationMemory: ConversationMemory;
+export let serverMessageLog: ServerMessageLog;
+export let usageCounter: UsageCounter;
+
+/** R2 から状態を読み込んだあとに呼ぶ（src/state.ts の loadState） */
+export function initStores() {
+  nameMemory = new NameMemory();
+  notesMemory = new NotesMemory();
+  conversationMemory = new ConversationMemory();
+  serverMessageLog = new ServerMessageLog();
+  usageCounter = new UsageCounter();
+}

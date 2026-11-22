@@ -1,5 +1,4 @@
-import fs from "node:fs";
-import path from "node:path";
+export { readJson, writeJsonAtomic } from "./state";
 
 const WEEKDAYS = ["日", "月", "火", "水", "木", "金", "土"];
 
@@ -100,33 +99,11 @@ export function oneLine(text: string): string {
   return (text ?? "").replace(/\s+/g, " ").trim();
 }
 
-export function readJson<T>(filePath: string, fallback: T): T {
-  try {
-    if (!fs.existsSync(filePath)) return fallback;
-    return JSON.parse(fs.readFileSync(filePath, "utf8")) as T;
-  } catch (error) {
-    console.error(`[JSON] read error ${filePath}`, error);
-    return fallback;
-  }
-}
-
-/** 一時ファイルに書いてから rename（書き込み途中で落ちても壊れない） */
-export function writeJsonAtomic(filePath: string, data: unknown) {
-  try {
-    fs.mkdirSync(path.dirname(filePath), { recursive: true });
-    const tmp = `${filePath}.tmp`;
-    fs.writeFileSync(tmp, JSON.stringify(data));
-    fs.renameSync(tmp, filePath);
-  } catch (error) {
-    console.error(`[JSON] write error ${filePath}`, error);
-  }
-}
-
 const pendingFlushes = new Set<() => void>();
 
 /** 保存をまとめて遅延実行する。メッセージごとの巨大JSON書き込みを避けるため */
 export function debounced(fn: () => void, delayMs = 10_000): () => void {
-  let timer: NodeJS.Timeout | null = null;
+  let timer: ReturnType<typeof setTimeout> | null = null;
   const flush = () => {
     if (timer) clearTimeout(timer);
     timer = null;
