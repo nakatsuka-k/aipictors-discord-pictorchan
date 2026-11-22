@@ -69,7 +69,9 @@ export class Gateway {
       await new Promise((resolve) => setTimeout(resolve, wait));
       if (this.stopped) return;
     }
-    this.session ??= (await this.storage.get<Session>("session")) ?? null;
+    // 保存した session は使わない: 新しい instance の bot.ts の cache（botId・サーバーの channel など）は READY と
+    // GUILD_CREATE でしか埋まらないので、別 instance から resume すると自分へのメンションが分からず返事をしなくなる。
+    // 同じ instance の中の再接続（op 7 など）は this.session が残っているので resume する
     let base = this.session?.resumeUrl;
     if (!base) {
       const info = await discord<{ url: string; session_start_limit?: { remaining: number; reset_after: number } }>("GET", "/gateway/bot");
