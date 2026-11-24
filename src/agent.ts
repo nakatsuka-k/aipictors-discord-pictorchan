@@ -1,8 +1,8 @@
 import { authorName, cache, emojiToString, fetchMessage, fetchMessages, isThread, type GuildState, type Message } from "./discord";
 import { CHAT_MODEL, GEMINI_CHAT_ENABLED, GEMINI_CHAT_MODEL, MAX_AGENT_ROUNDS } from "./config";
 import { createGeminiResponse, hasGeminiTurn, isGeminiAvailable } from "./gemini";
-import { conversationMemory, nameMemory, notesMemory } from "./store";
-import { buildTools, formatMessage, loadMessageMedia, runTool, type MediaImage, type ToolContext } from "./tools";
+import { conversationMemory, nameMemory, notesMemory, usageCounter } from "./store";
+import { buildTools, formatMessage, imageGenLimits, loadMessageMedia, runTool, type MediaImage, type ToolContext } from "./tools";
 import { chooseRandom, getJapanTime, truncate } from "./util";
 import { createResponse, type InputContent, type InputItem, type TokenUsage } from "./xai";
 
@@ -135,6 +135,10 @@ const AI_PHRASES = /(もちろんです[。！!]?|承知しました[。！!]?|�
 function hasEmoji(text: string): boolean {
   return /\p{Extended_Pictographic}|<a?:\w+:\d+>/u.test(text);
 }
+
+// 画像を付けずに描いたと言っている文面（「描いてみたい」などは除く）
+const FAKE_DRAWING =
+  /\[画像[^\]]*\]|\[image[^\]]*\]|(描いて|かいて|生成して|作って|つくって)(みた|きた|あげた)(?!い)|(描いた|生成した|描けた|生成できた)よ|(画像|イラスト|絵)が?(でき(た|あがった)よ|完成した)|描き上げ/i;
 
 function postprocess(raw: string, emojis: Map<string, string>, isDev: boolean): string {
   let text = (raw ?? "")
@@ -304,6 +308,18 @@ export async function generateReply(msg: Message, mode: ReplyMode): Promise<Agen
   if (ctx.imageLimitNotice) {
     trace("image-limit");
     finalText = `${finalText.replace(/\[SKIP\]/gi, "").trim()}\n\n${ctx.imageLimitNotice}`.trim();
+  } else if (ctx.files.length === 0 && FAKE_DRAWING.test(finalText)) {
+    // ツールを呼ばずに「描いてみたよ [画像 pictorchan.jpg]」と文字だけで描いたふりをすることがある。
+    // 画像が付いていないのに描いたと言っていたら、その文面は捨てて本当のことを返す
+    trace("fake-drawing");
+    const limits = imageGenLimits(new Date(), msg.author.id);
+    if (usageCounter.get(`img:${msg.author.id}`) >= limits.perUser) {
+      finalText = `🎨 ごめんね、今日のお絵かきは上限（1人1日${limits.perUser}枚）に達しちゃってるから描けないの🙏 日本時間の0時にリセットされるから、また明日頼んでね`;
+    } else if (usageCounter.get("img:total") >= limits.total) {
+      finalText = `🎨 ごめんね、今日はサーバー全体のお絵かき上限（1日${limits.total}枚）に達しちゃってるから描けないの🙏 日本時間の0時にリセットされるから、また明日頼んでね`;
+    } else {
+      finalText = "🎨 ごめんね、今回はうまく画像を作れなかったの🙏 「〇〇を描いて」ってもう一回頼んでくれたら描くね";
+    }
   }
   if (mode === "auto" && /^\s*\[SKIP\]\s*$/i.test(finalText)) {
     return { text: null, files: ctx.files, trace: ctx.trace, costUsd, usage };
