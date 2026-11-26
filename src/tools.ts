@@ -47,6 +47,8 @@ export type ToolContext = {
   seenCalls?: Set<string>;
   /** 画像生成が上限で断られたとき、返信に必ず添える案内 */
   imageLimitNotice?: string;
+  /** 画像を描けたとき、返信に必ず添える残りパワーの案内 */
+  imagePowerNotice?: string;
 };
 
 export type MediaImage = { url: string; caption: string };
@@ -100,7 +102,8 @@ export function registerMedia(ctx: ToolContext, url: string, kind: "image" | "vi
   return id;
 }
 
-export function formatMessage(ctx: ToolContext, m: Message, botId: string): string {
+/** maxContent: 本文の最大文字数。返事をする相手のメッセージ・返信先は長いプロンプトもそのまま読めるように大きくする */
+export function formatMessage(ctx: ToolContext, m: Message, botId: string, maxContent = 600): string {
   const name = m.author.id === botId ? "ぴくたーちゃん(あなた)" : authorName(m);
   const parts: string[] = [];
   const content = m.content
@@ -110,7 +113,7 @@ export function formatMessage(ctx: ToolContext, m: Message, botId: string): stri
     })
     .replace(/<#(\d+)>/g, (_, id) => `#${cache.channels.get(id)?.name ?? id}`)
     .trim();
-  if (content) parts.push(truncate(content, 600));
+  if (content) parts.push(truncate(content, maxContent));
   for (const att of m.attachments ?? []) {
     const kind = isImageAttachment(att) ? "image" : isVideoAttachment(att) ? "video" : "unknown";
     const ref = registerMedia(ctx, att.url, kind, att.filename ?? "file");
@@ -514,7 +517,7 @@ async function generateImage(ctx: ToolContext, prompt: string, aspectRatio: stri
   const userKey = `img:${ctx.msg.author.id}`;
   const limits = imageGenLimits(new Date(), ctx.msg.author.id);
   if (usageCounter.get(userKey) >= limits.perUser) {
-    ctx.imageLimitNotice = `🎨 今日のお絵かきは上限（1人1日${limits.perUser}枚）に達しちゃったから描けなかったの🙏 日本時間の0時にリセットされるから、また明日頼んでね`;
+    ctx.imageLimitNotice = `🎨 今日のお絵かきパワーを使い切っちゃったから描けなかったの🙏（⚡ 残りパワー 0/${limits.perUser}）日本時間の0時に回復するから、また明日頼んでね`;
     return { output: `上限のため描いていない。今日はもう${limits.perUser}枚描いたから、また明日ね。描いたふりはしないで、上限で描けないことを伝えて` };
   }
   if (usageCounter.get("img:total") >= limits.total) {
@@ -548,9 +551,10 @@ async function generateImage(ctx: ToolContext, prompt: string, aspectRatio: stri
   usageCounter.increment(userKey);
   usageCounter.increment("img:total");
   ctx.files.push({ name: "pictorchan.jpg", data: base64ToBytes(b64), description: truncate(prompt, 200) });
-  const remaining = limits.perUser - usageCounter.get(userKey);
+  const remaining = Math.max(0, limits.perUser - usageCounter.get(userKey));
+  ctx.imagePowerNotice = `⚡ 今日の残りパワー ${remaining}/${limits.perUser}（1枚で1パワー・日本時間0時に回復）`;
   return {
-    output: `生成できたよ。返信に自動で添付される（今日あと${remaining}枚）。描いた内容をひとこと添えて`,
+    output: `生成できたよ。返信に自動で添付される。残りパワー（今日あと${remaining}枚）の案内は自動で添えるので本文には書かなくていい。描いた内容をひとこと添えて`,
     images: [{ url: `data:image/jpeg;base64,${b64}`, caption: "【あなたが今生成した画像】" }],
   };
 }

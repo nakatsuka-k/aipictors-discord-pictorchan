@@ -198,7 +198,7 @@ export async function generateReply(msg: Message, mode: ReplyMode): Promise<Agen
     .sort((a, b) => Date.parse(a.timestamp) - Date.parse(b.timestamp))
     .filter((m) => Date.now() - Date.parse(m.timestamp) < 24 * 3600_000);
 
-  const current = formatMessage(ctx, msg, botId);
+  const current = formatMessage(ctx, msg, botId, 4000);
 
   const empty = { images: [] as MediaImage[], notes: [] as string[] };
   const own = await loadMessageMedia(msg, 4);
@@ -207,8 +207,8 @@ export async function generateReply(msg: Message, mode: ReplyMode): Promise<Agen
 
   const promptText = [
     recent.length ? `## 最近のチャンネルの流れ（古い順）\n${recent.map((m) => formatMessage(ctx, m, botId)).join("\n")}` : "",
-    rootReferenced ? `## 返信先のさらに元のメッセージ\n${formatMessage(ctx, rootReferenced, botId)}${root.notes.length ? `\n（${root.notes.join(" / ")}）` : ""}` : "",
-    referenced ? `## 返信先のメッセージ\n${formatMessage(ctx, referenced, botId)}${ref.notes.length ? `\n（${ref.notes.join(" / ")}）` : ""}` : "",
+    rootReferenced ? `## 返信先のさらに元のメッセージ\n${formatMessage(ctx, rootReferenced, botId, 2000)}${root.notes.length ? `\n（${root.notes.join(" / ")}）` : ""}` : "",
+    referenced ? `## 返信先のメッセージ\n${formatMessage(ctx, referenced, botId, 4000)}${ref.notes.length ? `\n（${ref.notes.join(" / ")}）` : ""}` : "",
     `## あなたへのメッセージ${mode === "auto" ? "（このチャンネルの最新発言）" : ""}\n${current}${own.notes.length ? `\n（${own.notes.join(" / ")}）` : ""}`,
     "",
     mode === "auto"
@@ -308,13 +308,15 @@ export async function generateReply(msg: Message, mode: ReplyMode): Promise<Agen
   if (ctx.imageLimitNotice) {
     trace("image-limit");
     finalText = `${finalText.replace(/\[SKIP\]/gi, "").trim()}\n\n${ctx.imageLimitNotice}`.trim();
+  } else if (ctx.imagePowerNotice && ctx.files.length > 0) {
+    finalText = `${finalText.replace(/\[SKIP\]/gi, "").trim()}\n\n${ctx.imagePowerNotice}`.trim();
   } else if (ctx.files.length === 0 && FAKE_DRAWING.test(finalText)) {
     // ツールを呼ばずに「描いてみたよ [画像 pictorchan.jpg]」と文字だけで描いたふりをすることがある。
     // 画像が付いていないのに描いたと言っていたら、その文面は捨てて本当のことを返す
     trace("fake-drawing");
     const limits = imageGenLimits(new Date(), msg.author.id);
     if (usageCounter.get(`img:${msg.author.id}`) >= limits.perUser) {
-      finalText = `🎨 ごめんね、今日のお絵かきは上限（1人1日${limits.perUser}枚）に達しちゃってるから描けないの🙏 日本時間の0時にリセットされるから、また明日頼んでね`;
+      finalText = `🎨 ごめんね、今日のお絵かきパワーを使い切っちゃってるから描けないの🙏（⚡ 残りパワー 0/${limits.perUser}）日本時間の0時に回復するから、また明日頼んでね`;
     } else if (usageCounter.get("img:total") >= limits.total) {
       finalText = `🎨 ごめんね、今日はサーバー全体のお絵かき上限（1日${limits.total}枚）に達しちゃってるから描けないの🙏 日本時間の0時にリセットされるから、また明日頼んでね`;
     } else {
