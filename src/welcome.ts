@@ -52,7 +52,8 @@ async function generateWelcomeImage(userName: string): Promise<FileData | null> 
 export async function welcomeMember(member: Member & { user: NonNullable<Member["user"]> }) {
   try {
     const userName = userDisplayName(member.user, member.nick);
-    const content = `🎉 **Welcome to Aipictors!** 🎉\n\n<@${member.user.id}>さん、ご参加いただきありがとうございます！\nThank you for joining us, ${userName}!\n欢迎加入，${userName}！\nBenvenuto/a, ${userName}! / 환영합니다, ${userName}님!\n\n📜 <#${RULES_CHANNEL_ID}> ← まずはここ / Start here / 请先看这里 / Inizia da qui / 여기부터`;
+    // メンションは読み込まれていない・退出した人や、一覧に無いチャンネルが「不明」と出るので、名前も書いておく
+    const content = `🎉 **Welcome to Aipictors!** 🎉\n\n<@${member.user.id}>（${userName}）さん、ご参加いただきありがとうございます！\nThank you for joining us, ${userName}!\n欢迎加入，${userName}！\nBenvenuto/a, ${userName}! / 환영합니다, ${userName}님!\n\n📜 <#${RULES_CHANNEL_ID}>（📌ルール・rules）← まずはここ / Start here / 请先看这里 / Inizia da qui / 여기부터`;
     const image = await generateWelcomeImage(userName);
     await sendMessage(WELCOME_CHANNEL_ID, image ? { content, files: [image] } : content).catch(async (error: unknown) => {
       console.error("[WELCOME] send with image failed", error);
